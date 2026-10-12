@@ -9,7 +9,10 @@ import {
     normalizeDateToISO,
     isValidCalendarDate,
     extractCanonicalDates,
-    isExamDateContradicted
+    isExamDateContradicted,
+    replyMentionsSubject,
+    escapeRegex,
+    getRequiredSubjects
 } from "../src/agent/consistencyChecker.js";
 import { McpClientManager } from "../src/mcp/mcpClient.js";
 import { AdaptiveAgent } from "../src/agent/adaptiveAgent.js";
@@ -1313,6 +1316,114 @@ Adjust as needed for your learning style.`
     assert.equal(checkSection2Wrong.valid, false, "Section 2 fallback must reject wrong exam date");
     assert.equal(checkSection2Wrong.reason, 'Final reply omitted or contradicted exam date "2026-11-30".');
     console.log("✓ Section 2 tool consistency fallback verified for equivalent and contradictory dates");
+
+    // -------------------------------------------------------------
+    // Test 13: Final-Answer Consistency Checker Subject Omission & Focused Retrieval Suite
+    // -------------------------------------------------------------
+    console.log("\n--- Test 13: Final-Answer Consistency Checker Subject Omission & Focused Retrieval Suite ---");
+
+    // 13.1 Unit tests for replyMentionsSubject: exact name, aliases (Math/Maths), case-insensitivity, boundary checks
+    assert.equal(replyMentionsSubject("Mathematics has 74 hours allocated.", "Mathematics"), true, "Matches exact name");
+    assert.equal(replyMentionsSubject("Math has 74 hours allocated.", "Mathematics"), true, "Matches Math alias");
+    assert.equal(replyMentionsSubject("Maths has 74 hours allocated.", "Mathematics"), true, "Matches Maths alias");
+    assert.equal(replyMentionsSubject("math: 74 hours allocated.", "Mathematics"), true, "Matches lowercase math alias");
+    assert.equal(replyMentionsSubject("MATHS: 74 hours allocated.", "Mathematics"), true, "Matches uppercase MATHS alias");
+    assert.equal(replyMentionsSubject("- **Math** (HIGH): 74h", "Mathematics"), true, "Matches markdown formatted **Math**");
+    assert.equal(replyMentionsSubject("- **Maths** (HIGH): 74h", "Mathematics"), true, "Matches markdown formatted **Maths**");
+    assert.equal(replyMentionsSubject("In the aftermath of the test", "Mathematics"), false, "Must not match 'aftermath'");
+    assert.equal(replyMentionsSubject("A polymath approach to study", "Mathematics"), false, "Must not match 'polymath'");
+    console.log("✓ replyMentionsSubject correctly matches Mathematics, Math, Maths, and avoids false substrings");
+
+    // 13.2 Unit tests for replyMentionsSubject: regex-special-character subjects (C++, R&D, etc.)
+    assert.equal(replyMentionsSubject("I study C++ every day.", "C++"), true, "Matches C++ in sentence");
+    assert.equal(replyMentionsSubject("- **C++**: 50 hours allocated.", "C++"), true, "Matches markdown formatted **C++**");
+    assert.equal(replyMentionsSubject("What about C++?", "C++"), true, "Matches C++ before punctuation");
+    assert.equal(replyMentionsSubject("What about C++programming?", "C++"), false, "Does not match C++ inside C++programming token");
+    assert.equal(replyMentionsSubject("Project R&D has 40 hours.", "R&D"), true, "Matches R&D safely without regex error");
+    assert.equal(replyMentionsSubject("Math (Advanced) is high priority.", "Math (Advanced)"), true, "Matches subject with parentheses safely");
+    console.log("✓ replyMentionsSubject safely handles subjects with regex metacharacters (C++, R&D, Math (Advanced))");
+
+    // 13.3 Integration: verifyFinalAnswerConsistency with Math and Maths aliases (Full-plan retrieval)
+    const replyWithMathAlias = `Here is your study plan details for "adaptive-demo":
+- Exam Date: 2026-11-30
+- Daily Available Study Time: 3 hours/day
+- Subjects: Math (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkMathAlias = verifyFinalAnswerConsistency(replyWithMathAlias, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkMathAlias.valid, true, "Full plan reply with 'Math' alias must pass consistency check without false positive");
+
+    const replyWithMathsAlias = `Here is your study plan details for "adaptive-demo":
+- Exam Date: 2026-11-30
+- Daily Available Study Time: 3 hours/day
+- Subjects: Maths (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkMathsAlias = verifyFinalAnswerConsistency(replyWithMathsAlias, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkMathsAlias.valid, true, "Full plan reply with 'Maths' alias must pass consistency check without false positive");
+    console.log("✓ Full-plan retrieval accepts 'Math' and 'Maths' aliases without false positive omission");
+
+    // 13.4 Integration: verifyFinalAnswerConsistency with regex-special-character subjects
+    const mockSpecialCharTools = [
+        {
+            toolName: "get_study_plan",
+            isError: false,
+            parsedData: {
+                planId: "special-plan",
+                examDate: "2026-11-30",
+                dailyStudyHours: 3,
+                subjects: {
+                    "C++": { allocatedHours: 60, priority: "high" },
+                    "R&D": { allocatedHours: 40, priority: "medium" }
+                }
+            }
+        }
+    ];
+    const replySpecialChars = `Study plan details for "special-plan":
+- Exam Date: 2026-11-30
+- Subjects: C++ (high priority), R&D (medium priority)`;
+    const checkSpecialChars = verifyFinalAnswerConsistency(replySpecialChars, mockSpecialCharTools, "Retrieve study plan special-plan.");
+    assert.equal(checkSpecialChars.valid, true, "Subjects with metacharacters (C++, R&D) must be checked safely without regex errors");
+    console.log("✓ Retrieval consistency safely handles plans containing metacharacters (C++, R&D)");
+
+    // 13.5 Genuine omissions in full-plan retrieval
+    const replyOmittedMath = `Here is your study plan details for "adaptive-demo":
+- Exam Date: 2026-11-30
+- Daily Available Study Time: 3 hours/day
+- Subjects: Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkOmittedMath = verifyFinalAnswerConsistency(replyOmittedMath, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkOmittedMath.valid, false, "Genuinely omitted subject Mathematics must be flagged");
+    assert.equal(checkOmittedMath.reason, 'Final reply omitted subject "Mathematics" from retrieved plan.');
+    assert.ok(checkOmittedMath.correctedReply.includes("Mathematics"), "Grounded fallback summary must include omitted subject");
+
+    // Generic filler response omitting all subjects
+    const replyGenericFiller = "Here is your retrieved study plan report.";
+    const checkGenericFiller = verifyFinalAnswerConsistency(replyGenericFiller, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkGenericFiller.valid, false, "Generic filler reply omitting subjects must be flagged");
+    assert.equal(checkGenericFiller.reason, 'Final reply omitted subject "Mathematics" from retrieved plan.');
+    console.log("✓ Genuine omissions in full-plan retrieval correctly intercepted and grounded");
+
+    // 13.6 Focused retrieval questions: Single-subject intent does NOT require all subjects
+    const focusedChemMessage = "How many hours do I have for Chemistry in adaptive-demo?";
+    const replyFocusedChem = `In adaptive-demo, you have 25.9 hours allocated for Chemistry (low priority). Your exam date is 2026-11-30.`;
+    const checkFocusedChem = verifyFinalAnswerConsistency(replyFocusedChem, mockRetrievalTools, focusedChemMessage);
+    assert.equal(checkFocusedChem.valid, true, "Focused retrieval asking for Chemistry only must NOT require Mathematics or Physics");
+
+    const focusedMathMessage = "What is my progress in Math?";
+    const replyFocusedMath = `In Math, you have completed 1.5 hours out of 74 allocated hours. Exam date: 2026-11-30.`;
+    const checkFocusedMath = verifyFinalAnswerConsistency(replyFocusedMath, mockRetrievalTools, focusedMathMessage);
+    assert.equal(checkFocusedMath.valid, true, "Focused retrieval asking for Math only must pass using Math alias without requiring Physics or Chemistry");
+
+    // Focused retrieval where the requested subject IS omitted
+    const replyFocusedOmission = "Here is your progress report. Exam date: 2026-11-30.";
+    const checkFocusedOmission = verifyFinalAnswerConsistency(replyFocusedOmission, mockRetrievalTools, focusedChemMessage);
+    assert.equal(checkFocusedOmission.valid, false, "Focused retrieval omitting the requested subject must be flagged");
+    assert.equal(checkFocusedOmission.reason, 'Final reply omitted subject "Chemistry" from retrieved plan.');
+
+    // Full-plan retrieval intent with single-subject reply MUST fail
+    const checkFullPlanSingleSub = verifyFinalAnswerConsistency(replyFocusedChem, mockRetrievalTools, "Retrieve study plan adaptive-demo. Report all subjects.");
+    assert.equal(checkFullPlanSingleSub.valid, false, "Full-plan retrieval request with only Chemistry in reply must fail for omitting Mathematics");
+    assert.equal(checkFullPlanSingleSub.reason, 'Final reply omitted subject "Mathematics" from retrieved plan.');
+    console.log("✓ Focused vs. full-plan retrieval correctly distinguished based on user intent");
 
     await mcpManager.disconnect();
 

@@ -278,6 +278,66 @@ export function isExamDateContradicted(text, expectedDateStr) {
 }
 
 /**
+ * Safely escapes regular expression metacharacters in a string.
+ * @param {string} str
+ * @returns {string}
+ */
+export function escapeRegex(str) {
+    if (typeof str !== "string") return "";
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Checks whether a text (such as an LLM reply or user prompt) mentions a subject.
+ * Safely handles:
+ * 1. Aliases: "Math" and "Maths" for "Mathematics" (case-insensitive).
+ * 2. Escaped metacharacters for subject names such as "C++" and "R&D".
+ * 3. Accurate boundary checking to prevent false substring matches (e.g. "aftermath").
+ * @param {string} text - Candidate text to inspect
+ * @param {string} subject - Target subject name
+ * @returns {boolean} True if subject or its alias is mentioned
+ */
+export function replyMentionsSubject(text, subject) {
+    if (!text || typeof text !== "string" || !subject || typeof subject !== "string") {
+        return false;
+    }
+    const cleanSub = subject.trim();
+    if (!cleanSub) return false;
+
+    // Mathematics aliases: "Math" and "Maths"
+    if (/^math(?:ematics)?$/i.test(cleanSub)) {
+        return /\b(?:mathematics|maths?)\b/i.test(text);
+    }
+
+    const escaped = escapeRegex(cleanSub);
+    const leadingBoundary = /^\w/.test(cleanSub) ? "\\b" : "(?:^|[\\s.,;!?:'\"()\\[\\]{}*\\/\\\\-])";
+    const trailingBoundary = /\w$/.test(cleanSub) ? "\\b" : "(?=$|[\\s.,;!?:'\"()\\[\\]{}*\\/\\\\-])";
+
+    const regex = new RegExp(`${leadingBoundary}${escaped}${trailingBoundary}`, "i");
+    return regex.test(text);
+}
+
+/**
+ * Determines which subjects are required in the reply based on user message and plan subjects.
+ * For focused retrieval questions (e.g. user asks only about "Chemistry"), only the mentioned
+ * subject(s) are required unless the user asks for all subjects or full plan.
+ * @param {string[]} subjectsInPlan
+ * @param {string} [userMessage=""]
+ * @returns {string[]}
+ */
+export function getRequiredSubjects(subjectsInPlan = [], userMessage = "") {
+    if (!userMessage || typeof userMessage !== "string") {
+        return subjectsInPlan;
+    }
+    const userMentionedSubjects = subjectsInPlan.filter(sub => replyMentionsSubject(userMessage, sub));
+    const asksForAllSubjects = /\b(?:all\s+subjects|every\s+subject|all\s+(?:of\s+)?my\s+subjects|full\s+plan|entire\s+plan|whole\s+plan)\b/i.test(userMessage);
+    if (!asksForAllSubjects && userMentionedSubjects.length > 0) {
+        return userMentionedSubjects;
+    }
+    return subjectsInPlan;
+}
+
+/**
  * Consistency and Grounding Verifier
  * Ensures agent final answers are strictly grounded in verified tool results
  * and never contradict numerical constraints (such as daily available study hours).
@@ -541,8 +601,9 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
         }
 
         const data = retrievalTool.parsedData;
-        const requiredSubjects = Object.keys(data.subjects || {});
-        const missingSubject = requiredSubjects.find(sub => !new RegExp(`\\b${sub}\\b`, "i").test(finalReply));
+        const subjectsInPlan = Object.keys(data.subjects || {});
+        const requiredSubjects = getRequiredSubjects(subjectsInPlan, userMessage);
+        const missingSubject = requiredSubjects.find(sub => !replyMentionsSubject(finalReply, sub));
 
         // Check if reply contradicts or omits examDate (normalizing equivalent date representations)
         const examDateContradiction = Boolean(data.examDate && isExamDateContradicted(finalReply, data.examDate));
@@ -595,7 +656,8 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
     // Consistency check for get_study_plan
     if (toolName === "get_study_plan" && parsedData) {
         const subjects = Object.keys(parsedData.subjects || {});
-        const missingSub = subjects.find(sub => !new RegExp(`\\b${sub}\\b`, "i").test(finalReply));
+        const requiredSubjects = getRequiredSubjects(subjects, userMessage);
+        const missingSub = requiredSubjects.find(sub => !replyMentionsSubject(finalReply, sub));
         if (missingSub) {
             return {
                 valid: false,
