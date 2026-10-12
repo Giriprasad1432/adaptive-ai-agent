@@ -200,6 +200,16 @@ async function runDeterministicTests() {
         // Step 9: Regression Suite for Study-Plan Accounting and Adaptation Consistency (adaptive-demo)
         console.log(`\n--- Test 7: Regression: Accounting & Adaptation Consistency for "adaptive-demo" ---`);
         const demoPlanId = "adaptive-demo";
+        const demoExamDate = (() => {
+            const date = new Date();
+            date.setDate(date.getDate() + 49);
+
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, "0");
+            const day = String(date.getDate()).padStart(2, "0");
+
+            return `${year}-${month}-${day}`;
+        })();
 
         // 7.1 Create plan
         const createDemoRes = await client.callTool({
@@ -207,7 +217,7 @@ async function runDeterministicTests() {
             arguments: {
                 planId: demoPlanId,
                 subjects: ["Mathematics", "Physics", "Chemistry"],
-                examDate: "2026-11-30",
+                examDate: demoExamDate,
                 dailyAvailableHours: 3,
                 priorities: { Mathematics: "high", Physics: "medium", Chemistry: "low" }
             }
@@ -293,7 +303,7 @@ async function runDeterministicTests() {
         const retrievedPlan = JSON.parse(getDemoRes.content[0].text);
 
         assert.equal(retrievedPlan.planId, "adaptive-demo");
-        assert.equal(retrievedPlan.examDate, "2026-11-30");
+        assert.equal(retrievedPlan.examDate, demoExamDate);
         assert.equal(retrievedPlan.daysRemaining, 49);
         assert.equal(retrievedPlan.dailyStudyHours, 3);
         assert.equal(retrievedPlan.availableCapacityHours, 147);
