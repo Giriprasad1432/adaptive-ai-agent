@@ -255,7 +255,7 @@ export function extractExplicitExamDates(text) {
  */
 export function isExamDateRequested(userMessage) {
     if (typeof userMessage !== "string" || !userMessage.trim()) return false;
-    return /\b(?:exam\s+date|target\s+exam\s+date|exam\s+day|date\s+of\s+(?:the\s+)?exam|when\s+(?:is|'s)\s+(?:the\s+|my\s+)?exam)\b/i.test(userMessage);
+    return /\b(?:exam\s+date|target\s+exam\s+date|exam\s+day|date\s+of\s+(?:the\s+)?exam|when(?:'s|\s+(?:is|'s))\s+(?:the\s+|my\s+)?exam)\b/i.test(userMessage);
 }
 
 /**
@@ -369,7 +369,7 @@ export function getRequiredSubjects(subjectsInPlan = [], userMessage = "") {
 
     // Check if user specifically requested a concise summary, progress update, exam date, or hours
     // where individual subject-by-subject breakdowns were not requested.
-    const isNarrowOrConciseQuery = /\b(?:concise|briefly|brief|short|quick|simple|progress|progressing|status|how\s+(?:am\s+i|is\s+it|is\s+my\s+plan)\s+(?:doing|going)|exam\s+date|when\s+(?:is|'s)\s+(?:the\s+|my\s+)?exam|date\s+of\s+(?:the\s+)?exam|remaining\s+hours|hours\s+remaining|how\s+many\s+hours|time\s+remaining|total\s+hours|total\s+remaining|available\s+hours|daily\s+(?:availability|hours)|sessions?)\b/i.test(userMessage);
+    const isNarrowOrConciseQuery = /\b(?:concise|briefly|brief|short|quick|simple|progress|progressing|status|how\s+(?:am\s+i|is\s+it|is\s+my\s+plan)\s+(?:doing|going)|exam\s+date|when(?:'s|\s+(?:is|'s))\s+(?:the\s+|my\s+)?exam|date\s+of\s+(?:the\s+)?exam|remaining\s+hours|hours\s+remaining|how\s+many\s+hours|time\s+remaining|total\s+hours|total\s+remaining|available\s+hours|daily\s+(?:availability|hours)|sessions?)\b/i.test(userMessage);
     if (isNarrowOrConciseQuery) {
         return [];
     }

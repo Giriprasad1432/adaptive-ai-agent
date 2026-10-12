@@ -2547,6 +2547,138 @@ The most recent sessions were all completed on October 12, 2026.
 
     console.log("✓ Section 19 verified: concise progress & exam-date false positives eliminated, strict validation preserved for conflicting dates/subjects, full-plan subject breakdowns enforced");
 
+    // =========================================================================
+    // SECTION 20: Phase 2 Backend Testing Hardening & Ambiguity Resolution Suite
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 20: Phase 2 Backend Testing Hardening & Ambiguity Resolution ---");
+    console.log("=======================================================");
+
+    // 20.1 Direct unit tests for isExamDateRequested (positive, ambiguous, and negative queries)
+    assert.equal(isExamDateRequested("What is my exam date for plan default?"), true, "Direct exam date query must be true");
+    assert.equal(isExamDateRequested("When is the exam?"), true, "when is the exam must be true");
+    assert.equal(isExamDateRequested("When's my exam?"), true, "when's my exam must be true");
+    assert.equal(isExamDateRequested("Tell me the date of the exam."), true, "date of the exam must be true");
+    assert.equal(isExamDateRequested("target exam date for plan default"), true, "target exam date must be true");
+    assert.equal(isExamDateRequested("What is the exam day?"), true, "exam day must be true");
+
+    // Ambiguous and negative queries mentioning 'exam' or 'date' without requesting exam date
+    assert.equal(isExamDateRequested("How is my preparation for the exam?"), false, "Preparation progress query mentioning exam must be false");
+    assert.equal(isExamDateRequested("Record 2 hours of study for the exam"), false, "Session recording mentioning exam must be false");
+    assert.equal(isExamDateRequested("Today's date is 2026-10-12"), false, "Mentioning today's date must be false");
+    assert.equal(isExamDateRequested("Briefly summarize my progress"), false, "Brief progress summary must be false");
+    assert.equal(isExamDateRequested(""), false, "Empty prompt must be false");
+    assert.equal(isExamDateRequested(null), false, "Null prompt must be false");
+
+    // 20.2 Exact literal contradictory date 2026-12-15 vs stored 2026-11-30
+    assert.equal(
+        isExamDateContradicted("Your exam date is 2026-12-15.", "2026-11-30"),
+        true,
+        "Exact literal 2026-12-15 must contradict stored 2026-11-30"
+    );
+    assert.equal(
+        isExamDateContradicted("Your exam date is 2026-11-30.", "2026-11-30"),
+        false,
+        "Exact literal 2026-11-30 must NOT contradict stored 2026-11-30"
+    );
+    assert.equal(
+        isExamDateContradicted("Your exam is scheduled for December 15, 2026.", "2026-11-30"),
+        true,
+        "Natural language December 15, 2026 must contradict stored 2026-11-30"
+    );
+    assert.equal(
+        isExamDateContradicted("You are making steady progress with 28 completed hours.", "2026-11-30"),
+        false,
+        "Omission of exam date must not contradict stored exam date"
+    );
+
+    const literalWrongDateReply = "Your exam is scheduled for 2026-12-15.";
+    const checkLiteralWrongDate = verifyFinalAnswerConsistency(literalWrongDateReply, executedSection19Tools, "When is my exam?");
+    assert.equal(checkLiteralWrongDate.valid, false, "Literal 2026-12-15 in response must fail verifyFinalAnswerConsistency");
+    assert.ok(checkLiteralWrongDate.reason.includes("exam date"), "Reason must cite exam date contradiction");
+    assert.ok(checkLiteralWrongDate.correctedReply.includes("2026-11-30"), "Corrected reply must restore verified 2026-11-30 date");
+
+    // 20.3 Ambiguous & conflicting user requests: conflicting scope in prompt
+    // When prompt contains both single-subject instruction and full breakdown instruction,
+    // explicit breakdown request takes precedence to guarantee completeness
+    const conflictingScopePrompt = "Show Mathematics only and give a full breakdown of all subjects";
+    assert.deepEqual(
+        getRequiredSubjects(["Mathematics", "Physics"], conflictingScopePrompt),
+        ["Mathematics", "Physics"],
+        "Explicit request for breakdown of all subjects takes precedence over single-subject constraint"
+    );
+
+    // 20.4 Schema validation for negative and non-positive numerical values
+    const recordToolDef = {
+        name: "record_study_session",
+        inputSchema: {
+            type: "object",
+            required: ["subject", "hoursSpent"],
+            properties: {
+                subject: { type: "string" },
+                hoursSpent: { type: "number" }
+            }
+        }
+    };
+    const negHoursVal = validateToolArguments(recordToolDef, { subject: "Mathematics", hoursSpent: -1.5 });
+    assert.equal(negHoursVal.valid, false, "Negative hoursSpent must be rejected by validator");
+    assert.ok(negHoursVal.error.includes("cannot be negative"), "Error message must state cannot be negative");
+
+    const createToolDef = {
+        name: "create_study_plan",
+        inputSchema: {
+            type: "object",
+            required: ["subjects", "examDate", "dailyAvailableHours"],
+            properties: {
+                planId: { type: "string" },
+                subjects: { type: "array" },
+                examDate: { type: "string" },
+                dailyAvailableHours: { type: "number" }
+            }
+        }
+    };
+    const zeroDailyHoursVal = validateToolArguments(createToolDef, {
+        planId: "test_zero_hours",
+        subjects: ["Mathematics"],
+        examDate: "2026-11-30",
+        dailyAvailableHours: 0
+    });
+    assert.equal(zeroDailyHoursVal.valid, false, "dailyAvailableHours: 0 must be rejected by validator");
+    assert.ok(zeroDailyHoursVal.error.includes("positive number greater than 0"), "Error message must specify positive number greater than 0");
+
+    const negDailyHoursVal = validateToolArguments(createToolDef, {
+        planId: "test_neg_hours",
+        subjects: ["Mathematics"],
+        examDate: "2026-11-30",
+        dailyAvailableHours: -2
+    });
+    assert.equal(negDailyHoursVal.valid, false, "dailyAvailableHours: -2 must be rejected by validator");
+
+    // 20.5 Intent routing & phantom execution suppression
+    // 20.5a isSessionRecordingIntent unit tests
+    assert.equal(isSessionRecordingIntent("Record study session for Mathematics"), true, "Session recording query must be detected");
+    assert.equal(isSessionRecordingIntent("Record that I studied physics for 1.5 hours today"), true, "Past study record statement must be detected");
+    assert.equal(isSessionRecordingIntent("Log a completed session for Chemistry"), true, "Log session query must be detected");
+    assert.equal(isSessionRecordingIntent("Log 2 hours studied in Mathematics"), true, "Log hours studied must be detected");
+    assert.equal(isSessionRecordingIntent("How is my study plan progressing?"), false, "Progress retrieval must NOT be session recording intent");
+    assert.equal(isSessionRecordingIntent("What is my exam date?"), false, "Exam date query must NOT be session recording intent");
+
+    // 20.5b Phantom session recording without tool execution must be rejected
+    const phantomSessionReply = "Study session of 2 hours for Mathematics recorded successfully!";
+    const checkPhantomSession = verifyFinalAnswerConsistency(phantomSessionReply, [], "Record study session for Mathematics");
+    assert.equal(checkPhantomSession.valid, false, "Phantom session reply without executed record_study_session must fail");
+    assert.equal(checkPhantomSession.failure, true, "Must be classified as failure");
+    assert.ok(checkPhantomSession.correctedReply.includes("Action Failed"), "Corrected reply must state Action Failed");
+
+    // 20.5c Phantom plan adaptation without tool execution must be rejected
+    const phantomAdaptReply = "Study plan adapted successfully to your new schedule!";
+    const checkPhantomAdapt = verifyFinalAnswerConsistency(phantomAdaptReply, [], "Adapt my study plan for the new deadline");
+    assert.equal(checkPhantomAdapt.valid, false, "Phantom adaptation reply without executed adapt_study_plan must fail");
+    assert.equal(checkPhantomAdapt.failure, true, "Must be classified as failure");
+    assert.ok(checkPhantomAdapt.correctedReply.includes("Action Failed"), "Corrected reply must state Action Failed");
+
+    console.log("✓ Section 20 verified: Phase 2 backend testing hardening, ambiguity resolution, numerical validation & phantom execution suppression complete");
+
     console.log("\n===============================================================================");
     console.log("ALL NORMALIZATION, VALIDATION, MCP & E2E AGENT TESTS PASSED! (100%)");
     console.log("===============================================================================");
