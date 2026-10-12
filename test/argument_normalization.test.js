@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent } from "../src/agent/normalizer.js";
+import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, shouldOmitSessionDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent } from "../src/agent/normalizer.js";
 import { validateToolArguments, verifyToolResult } from "../src/agent/validator.js";
 import {
     detectDailyScheduleOverrun,
     verifyFinalAnswerConsistency,
+    stripMetaPreamble,
+    detectPlanWideTotalRemainingHoursContradiction,
+    detectBlanketRecentSessionDateContradiction,
+    isExamDateRequested,
     formatGroundedPlanSummary,
     formatGroundedAdaptationSummary,
     formatGroundedRetrievalSummary,
@@ -23,6 +29,10 @@ import { AdaptiveAgent } from "../src/agent/adaptiveAgent.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Ensure all tests run with an isolated temporary data directory protecting shared production/demo data
+const isolatedDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "studypilot-norm-test-"));
+process.env.STUDYPILOT_DATA_DIR = isolatedDataDir;
 
 async function runNormalizationSuite() {
     console.log("=== Adaptive AI Agent: Tool Argument Normalization & Result Verification Suite ===");
@@ -250,7 +260,10 @@ async function runNormalizationSuite() {
     const serverScript = path.resolve(__dirname, "../studypilot-server/server.js");
     const mcpManager = new McpClientManager({
         command: "node",
-        args: [serverScript]
+        args: [serverScript],
+        env: {
+            STUDYPILOT_DATA_DIR: isolatedDataDir
+        }
     });
 
     const conn = await mcpManager.connect();
@@ -1194,8 +1207,8 @@ Adjust as needed for your learning style.`
     assert.equal(isExamDateContradicted("The exam is scheduled for 30 November 2026.", "2026-11-30"), false);
     assert.equal(isExamDateContradicted("The exam is scheduled for 30th of November, 2026.", "2026-11-30"), false);
     assert.equal(isExamDateContradicted("Your exam date is December 25, 2026.", "2026-11-30"), true);
-    assert.equal(isExamDateContradicted("Your study plan has Mathematics, Physics, and Chemistry.", "2026-11-30"), true);
-    console.log("✓ isExamDateContradicted accepts equivalent representations and rejects contradictory/omitted dates");
+    assert.equal(isExamDateContradicted("Your study plan has Mathematics, Physics, and Chemistry.", "2026-11-30"), false);
+    console.log("✓ isExamDateContradicted accepts equivalent representations, ignores omitted dates, and rejects contradictory dates");
 
     // 12.4 verifyFinalAnswerConsistency: Regression tests for equivalent formats (Retrieval intent)
     const mockRetrievalTools = [
@@ -1698,12 +1711,657 @@ Adjust as needed for your learning style.`
         await mcpManager.disconnect();
     }
 
+    // =========================================================================
+    // SECTION 15: Postman Regression Suite: Duplicate Mutation Protection,
+    // Session Date Grounding & Grounded Final Response Hardening
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 15: Duplicate Protection, Date & Grounding ---");
+    console.log("=======================================================");
+
+    // 15.1 Session Date Grounding: Relative "today" omitted so server default applies
+    const mockSessionToolDef = {
+        name: "record_study_session",
+        inputSchema: {
+            type: "object",
+            required: ["subject", "hoursSpent", "status"],
+            properties: {
+                subject: { type: "string" },
+                hoursSpent: { type: "number" },
+                status: { type: "string" },
+                date: { type: "string" },
+                planId: { type: "string" }
+            }
+        }
+    };
+
+    const normDateToday = normalizeToolArguments(mockSessionToolDef, {
+        subject: "Mathematics",
+        hoursSpent: "2",
+        status: "completed",
+        date: "today"
+    }, { message: "Record that I completed a 2-hour study session today in Mathematics." });
+    assert.equal(normDateToday.date, undefined, "Relative date 'today' must be omitted so server default applies");
+    assert.equal(normDateToday.hoursSpent, 2, "hoursSpent normalized to number");
+
+    // 15.2 Session Date Grounding: Fabricated historical date (e.g. 2024-01-01) omitted when user requested "today"
+    const normDateFabricatedToday = normalizeToolArguments(mockSessionToolDef, {
+        subject: "Mathematics",
+        hoursSpent: 2,
+        status: "completed",
+        date: "2024-01-01"
+    }, { message: "Record that I completed a 2-hour study session today in Mathematics." });
+    assert.equal(normDateFabricatedToday.date, undefined, "Fabricated date 2024-01-01 must be omitted when user requested today");
+
+    // 15.3 Session Date Grounding: Fabricated historical date omitted when no date was requested
+    const normDateFabricatedOmitted = normalizeToolArguments(mockSessionToolDef, {
+        subject: "Mathematics",
+        hoursSpent: 2,
+        status: "completed",
+        date: "2024-01-01"
+    }, { message: "Record that I completed a 2-hour study session in Mathematics." });
+    assert.equal(normDateFabricatedOmitted.date, undefined, "Fabricated date 2024-01-01 must be omitted when no date was in user message");
+
+    // 15.4 Session Date Grounding: Explicit user date preserved
+    const normDateExplicit = normalizeToolArguments(mockSessionToolDef, {
+        subject: "Mathematics",
+        hoursSpent: 2,
+        status: "completed",
+        date: "2026-10-09"
+    }, { message: "Record that I completed a 2-hour study session on 2026-10-09 in Mathematics." });
+    assert.equal(normDateExplicit.date, "2026-10-09", "Explicit date 2026-10-09 from user message must be preserved");
+
+    // 15.5 Session Date Grounding: User gave explicit date in message, model generated 'today'
+    const normDateExplicitRestored = normalizeToolArguments(mockSessionToolDef, {
+        subject: "Mathematics",
+        hoursSpent: 2,
+        status: "completed",
+        date: "today"
+    }, { message: "Record that I completed a 2-hour study session on 2026-10-09 in Mathematics." });
+    assert.equal(normDateExplicitRestored.date, "2026-10-09", "Explicit date 2026-10-09 restored from user message even if model said today");
+    console.log("✓ Session date grounding verified: relative 'today' and fabricated dates omitted; explicit dates preserved");
+
+    // 15.6 Grounded Final Responses: Raw JSON study plan dump intercepted
+    const mockSessionResult = {
+        message: 'Study session for "Mathematics" recorded successfully (completed).',
+        session: { subject: "Mathematics", hoursSpent: 2, status: "completed", date: "2026-10-12" },
+        subjectProgress: { subject: "Mathematics", completedHours: 2, missedHours: 0, remainingHours: 10, progressPercentage: "16.7%" },
+        overallPlanProgress: "16.7%"
+    };
+    const executedSessionTools = [{
+        toolName: "record_study_session",
+        toolArgs: { subject: "Mathematics", hoursSpent: 2, status: "completed" },
+        isError: false,
+        content: JSON.stringify(mockSessionResult),
+        parsedData: mockSessionResult
+    }];
+
+    const rawJsonPlanReply = JSON.stringify({
+        planId: "adaptive-demo",
+        examDate: "2024-10-31",
+        subjects: { Mathematics: { allocatedHours: 60 } },
+        sessions: []
+    });
+    const checkRawJsonPlan = verifyFinalAnswerConsistency(rawJsonPlanReply, executedSessionTools, "Record 2 hours Mathematics");
+    assert.equal(checkRawJsonPlan.valid, false, "Raw JSON plan object must be flagged as invalid");
+    assert.equal(checkRawJsonPlan.reason, "Final reply was a raw JSON object or code block instead of a grounded session confirmation.");
+    assert.ok(checkRawJsonPlan.correctedReply.includes("Study session recorded successfully!"), "Corrected reply must be grounded session summary");
+
+    // 15.7 Grounded Final Responses: Markdown fabricating unrelated exam date intercepted
+    const replyFabricatedExamDate = "Here is your update for Mathematics. Exam date: 2024-10-31. Completed 2 hours of study session with 16.7% progress.";
+    const checkFabricatedExamDate = verifyFinalAnswerConsistency(replyFabricatedExamDate, executedSessionTools, "Record 2 hours Mathematics");
+    assert.equal(checkFabricatedExamDate.valid, false, "Reply fabricating exam date after session recording must be flagged");
+    assert.equal(checkFabricatedExamDate.reason, "Final reply presented unrelated study plan details (e.g. exam date) instead of a grounded session confirmation.");
+    assert.ok(checkFabricatedExamDate.correctedReply.includes("**Completed Hours:** 2h"), "Corrected reply must provide verified metrics");
+
+    // 15.8 Grounded Final Responses: Markdown fabricating full study plan details intercepted
+    const replyFabricatedPlanDetails = "Study plan details: daily available study time: 3 hours/day. Recorded session in Mathematics completed.";
+    const checkFabricatedPlanDetails = verifyFinalAnswerConsistency(replyFabricatedPlanDetails, executedSessionTools, "Record 2 hours Mathematics");
+    assert.equal(checkFabricatedPlanDetails.valid, false, "Reply fabricating study plan details overview must be flagged");
+    assert.equal(checkFabricatedPlanDetails.reason, "Final reply presented unrelated study plan details (e.g. exam date) instead of a grounded session confirmation.");
+
+    // 15.9 Grounded Final Responses: Accurate session confirmation passes
+    const validSessionReply = "Recorded your 2-hour study session for Mathematics. Completed hours: 2h, remaining: 10h, progress: 16.7%.";
+    const checkValidSessionReply = verifyFinalAnswerConsistency(validSessionReply, executedSessionTools, "Record 2 hours Mathematics");
+    assert.equal(checkValidSessionReply.valid, true, "Accurate session confirmation must pass without modification");
+    console.log("✓ Grounded final response hardening verified: raw JSON and fabricated plan fields intercepted");
+
+    // 15.10 Duplicate Mutation Protection: Single round parallel duplicate calls
+    let mcpCalls = [];
+    const mockMcpForDup = {
+        listTools: () => [mockSessionToolDef],
+        callTool: async (name, args) => {
+            mcpCalls.push({ name, args });
+            return {
+                isError: false,
+                content: JSON.stringify({
+                    message: `Study session for "${args.subject}" recorded successfully (${args.status}).`,
+                    session: { subject: args.subject, hoursSpent: args.hoursSpent, status: args.status, date: "2026-10-12" },
+                    subjectProgress: { subject: args.subject, completedHours: args.hoursSpent, missedHours: 0, remainingHours: 10, progressPercentage: "16.7%" },
+                    overallPlanProgress: "16.7%"
+                })
+            };
+        }
+    };
+
+    const duplicateParallelProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        { name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } },
+                        { name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } }
+                    ],
+                    content: ""
+                };
+            }
+            return { toolCalls: [], content: "Recorded 2 hours of Mathematics session." };
+        }
+    };
+
+    mcpCalls = [];
+    const dupParallelAgent = new AdaptiveAgent({
+        provider: duplicateParallelProvider,
+        mcpClient: mockMcpForDup,
+        maxRounds: 3
+    });
+    const dupParallelRes = await dupParallelAgent.run({ message: "Record 2 hours of Mathematics" });
+    assert.equal(dupParallelRes.success, true, "Agent run must succeed");
+    assert.equal(mcpCalls.length, 1, "Duplicate parallel mutation call must be executed only once against MCP");
+    const dupSkippedStep = dupParallelRes.steps.find(s => s.type === "duplicate_mutation_skipped");
+    assert.ok(dupSkippedStep, "Must record duplicate_mutation_skipped step");
+
+    // 15.11 Duplicate Mutation Protection: Cross-round duplicate calls
+    const duplicateAcrossRoundsProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [{ name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } }],
+                    content: ""
+                };
+            }
+            if (this.callCount === 2) {
+                // Model confuses itself and repeats the identical tool call in Round 2
+                return {
+                    toolCalls: [{ name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } }],
+                    content: ""
+                };
+            }
+            return { toolCalls: [], content: "Recorded 2 hours of Mathematics session." };
+        }
+    };
+
+    mcpCalls = [];
+    const dupRoundsAgent = new AdaptiveAgent({
+        provider: duplicateAcrossRoundsProvider,
+        mcpClient: mockMcpForDup,
+        maxRounds: 4
+    });
+    const dupRoundsRes = await dupRoundsAgent.run({ message: "Record 2 hours of Mathematics" });
+    assert.equal(dupRoundsRes.success, true, "Agent run must succeed");
+    assert.equal(mcpCalls.length, 1, "Duplicate cross-round mutation call must not re-execute against MCP");
+
+    // 15.12 Duplicate Mutation Protection: Legitimate distinct calls are NOT blocked
+    const distinctCallsProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        { name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } },
+                        { name: "record_study_session", arguments: { subject: "Physics", hoursSpent: 1, status: "completed" } }
+                    ],
+                    content: ""
+                };
+            }
+            return { toolCalls: [], content: "Recorded Mathematics and Physics sessions." };
+        }
+    };
+
+    mcpCalls = [];
+    const distinctAgent = new AdaptiveAgent({
+        provider: distinctCallsProvider,
+        mcpClient: mockMcpForDup,
+        maxRounds: 3
+    });
+    const distinctRes = await distinctAgent.run({ message: "Record 2h Mathematics and 1h Physics" });
+    assert.equal(distinctRes.success, true, "Agent run must succeed");
+    assert.equal(mcpCalls.length, 2, "Distinct calls for different subjects must both execute");
+    assert.equal(mcpCalls[0].args.subject, "Mathematics");
+    assert.equal(mcpCalls[1].args.subject, "Physics");
+
+    // 15.13 Duplicate Mutation Protection: Retry after failure is NOT blocked
+    let failFirstAttempt = true;
+    const retryMcp = {
+        listTools: () => [mockSessionToolDef],
+        callTool: async (name, args) => {
+            if (failFirstAttempt) {
+                failFirstAttempt = false;
+                return { isError: true, content: "Database busy, temporary lock failure" };
+            }
+            return { isError: false, content: JSON.stringify(mockSessionResult) };
+        }
+    };
+
+    const retryProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [{ name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } }],
+                    content: ""
+                };
+            }
+            if (this.callCount === 2) {
+                // Model retries following failure
+                return {
+                    toolCalls: [{ name: "record_study_session", arguments: { subject: "Mathematics", hoursSpent: 2, status: "completed" } }],
+                    content: ""
+                };
+            }
+            return { toolCalls: [], content: "Recorded 2 hours of Mathematics session." };
+        }
+    };
+
+    const retryAgent = new AdaptiveAgent({
+        provider: retryProvider,
+        mcpClient: retryMcp,
+        maxRounds: 4
+    });
+    const retryRes = await retryAgent.run({ message: "Record 2 hours of Mathematics" });
+    assert.equal(retryRes.success, true, "Retry must succeed on second attempt");
+    assert.equal(retryRes.rounds, 3, "Took 3 rounds (fail -> retry success -> final answer)");
+    console.log("✓ Duplicate mutation protection verified: parallel duplicates deduplicated, cross-round duplicates skipped, distinct calls preserved, retries on failure permitted");
+
+    // =========================================================================
+    // SECTION 16: Model-Generated Meta-Preamble Sanitization & Grounding Invariants
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 16: Meta-Preamble Sanitization & Invariants ---");
+    console.log("=======================================================");
+
+    const samplePlanSummary = `Study Plan Details: "mutation-test-oct12"
+
+**Overview:**
+- **Exam Date:** 2026-11-30 (49 days remaining)
+- **Daily Available Study Time:** 3 hours/day
+- **Overall Progress:** 19%
+- **Total Hours:** 28h completed, 0h missed, 119h remaining
+
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 88.2h allocated, 28h completed, 60.2h remaining, 0h missed (32% progress)
+- **Physics** (MEDIUM Priority): 58.8h allocated, 0h completed, 58.8h remaining, 0h missed (0% progress)`;
+
+    // 16.1 Exact Postman phrase removed: "Here is the final answer to the original user question:"
+    const preamble1 = `Here is the final answer to the original user question:\n\n${samplePlanSummary}`;
+    assert.equal(stripMetaPreamble(preamble1), samplePlanSummary, "Preamble 'Here is the final answer to the original user question:' must be stripped");
+
+    // 16.2 "Here is the final answer:" removed
+    const preamble2 = `Here is the final answer:\n\n${samplePlanSummary}`;
+    assert.equal(stripMetaPreamble(preamble2), samplePlanSummary, "Preamble 'Here is the final answer:' must be stripped");
+
+    // 16.3 "Based on the tool results, here is the final answer:" removed
+    const preamble3 = `Based on the tool results, here is the final answer:\n\n${samplePlanSummary}`;
+    assert.equal(stripMetaPreamble(preamble3), samplePlanSummary, "Preamble 'Based on the tool results, here is the final answer:' must be stripped");
+
+    // 16.4 Case-insensitivity: lowercase and uppercase stripped
+    const preambleLower = `here is the final answer to the original user question:\n\n${samplePlanSummary}`;
+    assert.equal(stripMetaPreamble(preambleLower), samplePlanSummary, "Lowercase preamble must be stripped");
+
+    const preambleUpper = `HERE IS THE FINAL ANSWER TO THE ORIGINAL USER QUESTION:\n\n${samplePlanSummary}`;
+    assert.equal(stripMetaPreamble(preambleUpper), samplePlanSummary, "Uppercase preamble must be stripped");
+
+    // 16.5 Markdown bold formatting stripped
+    const preambleBold = `**Here is the final answer to the original user question:**\n\n${samplePlanSummary}`;
+    assert.equal(stripMetaPreamble(preambleBold), samplePlanSummary, "Bold markdown preamble must be stripped");
+
+    // 16.6 Plain reply without preamble remains completely unchanged
+    assert.equal(stripMetaPreamble(samplePlanSummary), samplePlanSummary, "Reply without preamble must remain 100% unchanged");
+
+    // 16.7 Meaningful introductory prose preserved
+    const meaningfulIntro1 = `Here is your updated study plan for Mathematics and Physics:\n- Math: 10h\n- Physics: 5h`;
+    assert.equal(stripMetaPreamble(meaningfulIntro1), meaningfulIntro1, "Meaningful intro 'Here is your updated study plan' must NOT be stripped");
+
+    const meaningfulIntro2 = `Here is an overview of your schedule before the exam on 2026-11-30:\n- Daily hours: 3h`;
+    assert.equal(stripMetaPreamble(meaningfulIntro2), meaningfulIntro2, "Meaningful intro 'Here is an overview of your schedule' must NOT be stripped");
+
+    const meaningfulIntro3 = `Based on your exam date, you have 49 days remaining. Total hours allocated: 147h.`;
+    assert.equal(stripMetaPreamble(meaningfulIntro3), meaningfulIntro3, "Meaningful intro 'Based on your exam date' must NOT be stripped");
+
+    // 16.8 Sanitization does not allow contradictory exam date to pass consistency validation
+    const mockRetrievalPlan = {
+        planId: "mutation-test-oct12",
+        examDate: "2026-11-30",
+        daysRemaining: 49,
+        dailyAvailableHours: 3,
+        totalCompletedHours: 28,
+        totalMissedHours: 0,
+        totalRemainingHours: 119,
+        subjects: {
+            Mathematics: { allocatedHours: 88.2, completedHours: 28, remainingHours: 60.2, priority: "high" },
+            Physics: { allocatedHours: 58.8, completedHours: 0, remainingHours: 58.8, priority: "medium" }
+        },
+        sessions: [{ subject: "Mathematics", hoursSpent: 2, status: "completed", date: "2026-10-12" }],
+        totalSessionsRecorded: 1,
+        recentSessions: [{ subject: "Mathematics", hoursSpent: 2, status: "completed", date: "2026-10-12" }]
+    };
+    const executedRetrievalTools = [{
+        toolName: "get_study_plan",
+        toolArgs: { planId: "mutation-test-oct12" },
+        isError: false,
+        content: JSON.stringify(mockRetrievalPlan),
+        parsedData: mockRetrievalPlan
+    }];
+
+    // Contradictory exam date with preamble must still FAIL consistency check
+    const contradictoryDateReply = `Here is the final answer to the original user question: Exam date is 2020-01-01 for Mathematics and Physics. Total hours: 147h.`;
+    const checkContradictory = verifyFinalAnswerConsistency(contradictoryDateReply, executedRetrievalTools, "Show me my plan");
+    assert.equal(checkContradictory.valid, false, "Sanitized reply with contradictory exam date must still fail consistency check");
+    assert.ok(checkContradictory.reason.includes("exam date"), "Reason must report exam date contradiction");
+
+    // 16.9 Sanitization does not allow false "no sessions" claim to pass consistency check
+    const falseNoSessionsReply = `Here is the final answer: Mathematics and Physics are scheduled for 2026-11-30, but you have no sessions recorded.`;
+    const checkFalseNoSessions = verifyFinalAnswerConsistency(falseNoSessionsReply, executedRetrievalTools, "Show me my plan");
+    assert.equal(checkFalseNoSessions.valid, false, "Sanitized reply with false 'no sessions' claim must still fail consistency check");
+
+    // 16.10 Preamble-only reply (empty after stripping) fails consistency check and triggers grounded summary
+    const preambleOnlyReply = `Here is the final answer to the original user question:`;
+    const checkPreambleOnly = verifyFinalAnswerConsistency(preambleOnlyReply, executedRetrievalTools, "Show me my plan");
+    assert.equal(checkPreambleOnly.valid, false, "Preamble-only response must fail consistency check");
+    assert.ok(checkPreambleOnly.correctedReply.includes("Study Plan Details:"), "Must provide grounded retrieval summary");
+
+    // 16.11 Valid retrieval reply with preamble passes consistency check and returns cleanly sanitized
+    const validPreambleReply = `Here is the final answer to the original user question:\n\nStudy Plan Details: "mutation-test-oct12"\n\n**Overview:**\n- **Exam Date:** 2026-11-30\n- **Subjects:** Mathematics (HIGH Priority), Physics (MEDIUM Priority)`;
+    const checkValidPreamble = verifyFinalAnswerConsistency(validPreambleReply, executedRetrievalTools, "Show me my plan");
+    assert.equal(checkValidPreamble.valid, true, "Accurate retrieval reply with preamble must pass consistency check");
+
+    // 16.12 End-to-end agent run: Preamble is stripped from agent final reply
+    const preambleAgentProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [{ name: "get_study_plan", arguments: { planId: "mutation-test-oct12" } }],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: `Here is the final answer to the original user question:\n\nStudy Plan Details: "mutation-test-oct12"\n- **Exam Date:** 2026-11-30\n- **Subjects:** Mathematics and Physics`
+            };
+        }
+    };
+
+    const mockMcpForPreamble = {
+        listTools: () => [{ name: "get_study_plan", inputSchema: { type: "object", properties: { planId: { type: "string" } } } }],
+        callTool: async () => ({ isError: false, content: JSON.stringify(mockRetrievalPlan) })
+    };
+
+    const preambleAgent = new AdaptiveAgent({
+        provider: preambleAgentProvider,
+        mcpClient: mockMcpForPreamble,
+        maxRounds: 3
+    });
+
+    const agentPreambleRes = await preambleAgent.run({ message: "Show me my study plan for mutation-test-oct12" });
+    assert.equal(agentPreambleRes.success, true, "Agent run must succeed");
+    assert.ok(!agentPreambleRes.reply.startsWith("Here is the final answer"), "Agent reply must NOT have leading meta-preamble");
+    assert.ok(agentPreambleRes.reply.startsWith("Study Plan Details:"), "Agent reply must start directly with clean answer content");
+    assert.ok(agentPreambleRes.reply.includes("2026-11-30"), "Agent reply must preserve all content");
+    console.log("✓ Meta-preamble sanitization verified: preambles cleanly stripped, meaningful prose preserved, grounding invariants enforced");
+
+    // =========================================================================
+    // SECTION 17: Retrieval Summary Accuracy & Plan-Wide vs Subject Grounding
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 17: Retrieval Summary Accuracy & Grounding ---");
+    console.log("=======================================================");
+
+    const mockOct12Plan = {
+        planId: "mutation-test-oct12",
+        examDate: "2026-11-30",
+        daysRemaining: 49,
+        dailyAvailableHours: 3,
+        totalCompletedHours: 28,
+        totalMissedHours: 0,
+        totalRemainingHours: 119,
+        totalAllocatedHours: 147,
+        totalAvailableHours: 147,
+        availableCapacityHours: 147,
+        overallProgress: "19%",
+        subjects: {
+            Mathematics: { allocatedHours: 88.2, completedHours: 28, remainingHours: 60.2, missedHours: 0, priority: "high", progressPercentage: 32 },
+            Physics: { allocatedHours: 58.8, completedHours: 0, remainingHours: 58.8, missedHours: 0, priority: "medium", progressPercentage: 0 }
+        },
+        totalSessionsRecorded: 5,
+        recentSessions: [
+            { id: "s1", date: "2024-01-01", subject: "Mathematics", hoursSpent: 2, status: "completed" },
+            { id: "s2", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" },
+            { id: "s3", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" },
+            { id: "s4", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" },
+            { id: "s5", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" }
+        ]
+    };
+    const executedOct12RetrievalTools = [{
+        toolName: "get_study_plan",
+        toolArgs: { planId: "mutation-test-oct12" },
+        isError: false,
+        content: JSON.stringify(mockOct12Plan),
+        parsedData: mockOct12Plan
+    }];
+
+    // 17.1: Incorrect plan-wide total (119 expected, 60.2 claimed) is rejected and replaced by a grounded summary
+    const incorrectTotalReply = `Study Plan Details: "mutation-test-oct12"
+
+**Overview:**
+- **Exam Date:** 2026-11-30
+- Total remaining hours: 60.2
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`;
+    const checkIncorrectTotal = verifyFinalAnswerConsistency(incorrectTotalReply, executedOct12RetrievalTools, "Show me my plan");
+    assert.equal(checkIncorrectTotal.valid, false, "Substituted subject remaining hours (60.2) for plan-wide total (119) must fail consistency check");
+    assert.ok(checkIncorrectTotal.reason.includes("total remaining hours"), "Reason must cite total remaining hours contradiction");
+    assert.ok(checkIncorrectTotal.correctedReply.includes("119h remaining"), "Corrected reply must provide grounded total of 119h remaining");
+
+    // 17.2: Correct plan-wide total of 119 is accepted
+    const correctTotalReply = `Study Plan Details: "mutation-test-oct12"
+
+**Overview:**
+- **Exam Date:** 2026-11-30
+- Total remaining hours: 119
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`;
+    const checkCorrectTotal = verifyFinalAnswerConsistency(correctTotalReply, executedOct12RetrievalTools, "Show me my plan");
+    assert.equal(checkCorrectTotal.valid, true, "Accurate plan-wide total of 119 must pass consistency check");
+
+    // 17.3: Subject-specific values of 60.2 and 58.8 without a contradictory plan-wide claim are accepted
+    const subjectOnlyReply = `Study Plan Details: "mutation-test-oct12"
+
+**Overview:**
+- **Exam Date:** 2026-11-30
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`;
+    const checkSubjectOnly = verifyFinalAnswerConsistency(subjectOnlyReply, executedOct12RetrievalTools, "Show me my plan");
+    assert.equal(checkSubjectOnly.valid, true, "Subject-specific values without a contradictory plan-wide total claim must pass consistency check");
+
+    // 17.4: A blanket claim that all recent sessions occurred on October 12, 2026 is rejected when records include both 2024-01-01 and 2026-10-12
+    const falseBlanketDateReply = `Study Plan Details: "mutation-test-oct12"
+
+**Overview:**
+- **Exam Date:** 2026-11-30
+- Total remaining hours: 119
+The most recent sessions were all completed on October 12, 2026.
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`;
+    const checkFalseBlanket = verifyFinalAnswerConsistency(falseBlanketDateReply, executedOct12RetrievalTools, "Show me my plan");
+    assert.equal(checkFalseBlanket.valid, false, "False blanket claim that all recent sessions were on October 12 must fail consistency check when 2024-01-01 session exists");
+    assert.ok(checkFalseBlanket.reason.includes("distinct dates") || checkFalseBlanket.reason.includes("October 12, 2026"), "Reason must identify false blanket session date claim");
+    assert.ok(checkFalseBlanket.correctedReply.includes("2024-01-01"), "Corrected reply must include actual session dates");
+
+    // 17.5: The same blanket claim is accepted when all recent sessions actually match that date
+    const allOct12Plan = {
+        ...mockOct12Plan,
+        recentSessions: [
+            { id: "s2", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" },
+            { id: "s3", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" }
+        ]
+    };
+    const executedAllOct12Tools = [{
+        toolName: "get_study_plan",
+        toolArgs: { planId: "mutation-test-oct12" },
+        isError: false,
+        content: JSON.stringify(allOct12Plan),
+        parsedData: allOct12Plan
+    }];
+    const checkValidBlanket = verifyFinalAnswerConsistency(falseBlanketDateReply, executedAllOct12Tools, "Show me my plan");
+    assert.equal(checkValidBlanket.valid, true, "Blanket claim must pass consistency check when all recent sessions actually match that date");
+
+    // 17.6: End-to-end agent verification where the provider returns the flawed response (substituting 60.2 and claiming all sessions on Oct 12), and the agent triggers grounded correction
+    const flawedPostmanProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [{ name: "get_study_plan", arguments: { planId: "mutation-test-oct12" } }],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: `Study Plan Details: "mutation-test-oct12"
+
+**Overview:**
+- **Exam Date:** 2026-11-30
+- Total remaining hours: 60.2
+The most recent sessions were all completed on October 12, 2026.
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`
+            };
+        }
+    };
+    const mockMcpForOct12 = {
+        listTools: () => [{ name: "get_study_plan", inputSchema: { type: "object", properties: { planId: { type: "string" } } } }],
+        callTool: async () => ({ isError: false, content: JSON.stringify(mockOct12Plan) })
+    };
+    const oct12Agent = new AdaptiveAgent({
+        provider: flawedPostmanProvider,
+        mcpClient: mockMcpForOct12,
+        maxRounds: 3
+    });
+    const agentOct12Res = await oct12Agent.run({ message: "Show me my study plan for mutation-test-oct12" });
+    assert.equal(agentOct12Res.success, true, "Agent run must succeed");
+    assert.ok(agentOct12Res.reply.includes("119h remaining"), "Agent reply must report grounded total remaining hours (119h)");
+    assert.ok(agentOct12Res.reply.includes("2024-01-01"), "Agent reply must include older session date 2024-01-01");
+    assert.ok(!agentOct12Res.reply.includes("were all completed on October 12"), "Agent reply must not contain false blanket statement");
+    console.log("✓ Retrieval summary accuracy verified: plan-wide totals distinguished, recent session dates validated, grounding enforced");
+
+    // =========================================================================
+    // SECTION 18: Exam-Date Consistency Check & False Positive Prevention
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 18: Exam-Date Consistency & Omission Distinction ---");
+    console.log("=======================================================");
+
+    const mockExamDatePlan = {
+        planId: "mutation-test-oct12",
+        examDate: "2026-11-30",
+        daysRemaining: 49,
+        dailyAvailableHours: 3,
+        totalCompletedHours: 28,
+        totalMissedHours: 0,
+        totalRemainingHours: 119,
+        totalAllocatedHours: 147,
+        totalAvailableHours: 147,
+        overallProgress: "19%",
+        subjects: {
+            Mathematics: { allocatedHours: 88.2, completedHours: 28, remainingHours: 60.2, missedHours: 0, priority: "high", progressPercentage: 32 },
+            Physics: { allocatedHours: 58.8, completedHours: 0, remainingHours: 58.8, missedHours: 0, priority: "medium", progressPercentage: 0 }
+        },
+        totalSessionsRecorded: 1,
+        recentSessions: [
+            { id: "s1", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" }
+        ]
+    };
+    const executedExamDateTools = [{
+        toolName: "get_study_plan",
+        toolArgs: { planId: "mutation-test-oct12" },
+        isError: false,
+        content: JSON.stringify(mockExamDatePlan),
+        parsedData: mockExamDatePlan
+    }];
+
+    // 18.1: A concise hours-only answer with no exam date (live Postman reproduction) must pass without false positive
+    const livePostmanReply = "The total remaining hours for the entire plan are 119 hours. The total remaining hours for each subject are: Mathematics: 60.2 hours; Physics: 58.8 hours.";
+    const checkLivePostman = verifyFinalAnswerConsistency(livePostmanReply, executedExamDateTools, "What are the total remaining hours for mutation-test-oct12?");
+    assert.equal(checkLivePostman.valid, true, "Concise hours-only answer without exam date must pass consistency check without false positive");
+
+    // 18.2: A correct exam date must pass
+    const correctExamDateReply = `Study Plan Details: "mutation-test-oct12"
+**Overview:**
+- **Exam Date:** 2026-11-30
+- Total remaining hours: 119
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`;
+    const checkCorrectExamDate = verifyFinalAnswerConsistency(correctExamDateReply, executedExamDateTools, "Show me my study plan");
+    assert.equal(checkCorrectExamDate.valid, true, "Reply with correct exam date must pass consistency check");
+
+    // 18.3: An explicitly requested exam date that is omitted must fail consistency check
+    const examDateRequestedPrompt = "Retrieve study plan mutation-test-oct12. Report the exam date and remaining hours.";
+    const checkOmittedRequestedExamDate = verifyFinalAnswerConsistency(livePostmanReply, executedExamDateTools, examDateRequestedPrompt);
+    assert.equal(checkOmittedRequestedExamDate.valid, false, "Omission of exam date when explicitly requested by user must fail consistency check");
+    assert.ok(checkOmittedRequestedExamDate.reason.includes("exam date"), "Reason must identify omitted exam date");
+    assert.ok(checkOmittedRequestedExamDate.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date 2026-11-30");
+
+    // 18.4: A conflicting exam date must fail consistency check
+    const conflictingExamDateReply = `Study Plan Details: "mutation-test-oct12"
+**Overview:**
+- **Exam Date:** 2026-12-25
+- Total remaining hours: 119
+**Subject Breakdown:**
+- **Mathematics** (HIGH Priority): 60.2h remaining
+- **Physics** (MEDIUM Priority): 58.8h remaining`;
+    const checkConflictingExamDate = verifyFinalAnswerConsistency(conflictingExamDateReply, executedExamDateTools, "Show me my study plan");
+    assert.equal(checkConflictingExamDate.valid, false, "Reply with conflicting exam date must fail consistency check");
+    assert.ok(checkConflictingExamDate.reason.includes("exam date"), "Reason must cite exam date contradiction");
+    assert.ok(checkConflictingExamDate.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date 2026-11-30");
+
+    // 18.5: A retrieval answer that still has incorrect total remaining hours (even without exam date) must fail
+    const wrongHoursNoExamDateReply = "The total remaining hours for the entire plan are 60.2 hours. The total remaining hours for each subject are: Mathematics: 60.2 hours; Physics: 58.8 hours.";
+    const checkWrongHoursNoExamDate = verifyFinalAnswerConsistency(wrongHoursNoExamDateReply, executedExamDateTools, "What are the remaining hours?");
+    assert.equal(checkWrongHoursNoExamDate.valid, false, "Incorrect total remaining hours without exam date must still fail consistency check");
+    assert.ok(checkWrongHoursNoExamDate.reason.includes("total remaining hours"), "Reason must cite total remaining hours contradiction");
+    assert.ok(checkWrongHoursNoExamDate.correctedReply.includes("119h remaining"), "Corrected reply must provide grounded total of 119h remaining");
+
+    console.log("✓ Exam-date consistency check verified: false positive eliminated, explicit requests enforced, contradictions caught");
+
     console.log("\n===============================================================================");
     console.log("ALL NORMALIZATION, VALIDATION, MCP & E2E AGENT TESTS PASSED! (100%)");
     console.log("===============================================================================");
 }
 
-runNormalizationSuite().catch(err => {
-    console.error("Test execution failed:", err);
-    process.exit(1);
-});
+runNormalizationSuite()
+    .finally(() => {
+        try {
+            fs.rmSync(isolatedDataDir, { recursive: true, force: true });
+        } catch {
+            // ignore cleanup failure on Windows temp
+        }
+    })
+    .catch(err => {
+        console.error("Test execution failed:", err);
+        process.exit(1);
+    });

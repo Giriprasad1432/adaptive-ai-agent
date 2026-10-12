@@ -3,9 +3,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import path from "node:path";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { DATA_FILE, LOCK_FILE, acquireLock, releaseLock, withFileLock, loadAllPlans, saveAllPlans, savePlan, getPlan, updatePlan } from "../studypilot-server/storage.js";
+
+// Ensure module constants (DATA_FILE, LOCK_FILE) initialize within isolated temporary storage
+const isolatedDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "studypilot-mcp-test-"));
+process.env.STUDYPILOT_DATA_DIR = isolatedDataDir;
+
+const { DATA_FILE, LOCK_FILE, acquireLock, releaseLock, withFileLock, loadAllPlans, saveAllPlans, savePlan, getPlan, updatePlan } = await import("../studypilot-server/storage.js");
 import { recordSession } from "../studypilot-server/planner.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -24,7 +30,11 @@ async function runDeterministicTests() {
 
     const transport = new StdioClientTransport({
         command: "node",
-        args: [serverScript]
+        args: [serverScript],
+        env: {
+            ...process.env,
+            STUDYPILOT_DATA_DIR: isolatedDataDir
+        }
     });
 
     try {
@@ -395,14 +405,14 @@ async function runDeterministicTests() {
         console.log("\n--- Test 9: Prevent Destructive Writes after Read Failures ---");
 
         // 9a. Verify genuinely new installation returns {} when target file does not exist
-        const nonExistentFile = path.resolve(__dirname, `../studypilot-server/data/nonexistent_${Date.now()}.json`);
+        const nonExistentFile = path.join(isolatedDataDir, `nonexistent_${Date.now()}.json`);
         assert.ok(!fs.existsSync(nonExistentFile), "nonExistentFile must not exist initially");
         const emptyPlans = loadAllPlans(1, 5, nonExistentFile);
         assert.deepEqual(emptyPlans, {}, "loadAllPlans must return {} when target file does not exist");
         console.log("✓ New installation behavior preserved: returns {} when file does not exist");
 
         // 9b. Simulate malformed JSON in a data file and verify savePlan throws and does NOT overwrite
-        const testDataFile = path.resolve(__dirname, `../studypilot-server/data/test_malformed_${Date.now()}.json`);
+        const testDataFile = path.join(isolatedDataDir, `test_malformed_${Date.now()}.json`);
         const malformedContent = '{"corrupted": true, [malformed_syntax}';
         try {
             fs.writeFileSync(testDataFile, malformedContent, "utf-8");
@@ -481,7 +491,7 @@ async function runDeterministicTests() {
         // Step 10: Regression Test: Eliminate Non-Atomic Fallback & Preserve Data on Rename Failure
         console.log("\n--- Test 10: Eliminate Non-Atomic Fallback & Preserve Data on Rename Failure ---");
 
-        const testRenameFile = path.resolve(__dirname, `../studypilot-server/data/test_rename_${Date.now()}.json`);
+        const testRenameFile = path.join(isolatedDataDir, `test_rename_${Date.now()}.json`);
         const initialValidData = JSON.stringify({ original_plan: { planId: "original_plan", hours: 40 } }, null, 2);
         fs.writeFileSync(testRenameFile, initialValidData, "utf-8");
 
@@ -539,7 +549,7 @@ async function runDeterministicTests() {
 
         // 11a. True cross-process concurrent updates via child processes on an isolated storage file
         const crossProcPlanId = `cproc_plan_${Date.now()}`;
-        const testFileCrossProc = path.resolve(__dirname, `../studypilot-server/data/test_cproc_${Date.now()}.json`);
+        const testFileCrossProc = path.join(isolatedDataDir, `test_cproc_${Date.now()}.json`);
 
         try {
             savePlan(crossProcPlanId, {
@@ -596,7 +606,13 @@ async function runDeterministicTests() {
                     import { recordSession } from ${JSON.stringify(plannerUrl)};
                     updatePlan(${JSON.stringify(crossProcPlanId)}, (plan) => recordSession(plan, ${JSON.stringify(sess)}), ${JSON.stringify(targetFilePath)});
                 `;
-                const proc = spawn("node", ["--input-type=module", "-e", code], { stdio: "inherit" });
+                const proc = spawn("node", ["--input-type=module", "-e", code], {
+                    stdio: "inherit",
+                    env: {
+                        ...process.env,
+                        STUDYPILOT_DATA_DIR: isolatedDataDir
+                    }
+                });
                 proc.on("close", (code) => {
                     if (code === 0) resolve();
                     else reject(new Error(`Worker process exited with code ${code}`));
@@ -720,14 +736,16 @@ async function runDeterministicTests() {
         console.log("\n========================================================");
         console.log("ALL 11 DETERMINISTIC & REGRESSION TESTS PASSED! (100%)");
         console.log("========================================================");
-
-        await client.close();
     } catch (error) {
         console.error("\n❌ Test failure:", error);
+        throw error;
+    } finally {
         try {
             await client.close();
         } catch { }
-        process.exit(1);
+        try {
+            fs.rmSync(isolatedDataDir, { recursive: true, force: true });
+        } catch { }
     }
 }
 

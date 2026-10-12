@@ -1,7 +1,29 @@
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
 import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, extractExplicitPlanId } from "./normalizer.js";
 import { validateToolArguments, verifyToolResult } from "./validator.js";
-import { verifyFinalAnswerConsistency, formatGroundedPlanSummary, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
+import { verifyFinalAnswerConsistency, stripMetaPreamble, formatGroundedPlanSummary, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
+
+const MUTATION_TOOLS = new Set(["record_study_session", "create_study_plan", "adapt_study_plan"]);
+
+function areToolArgumentsEqual(args1, args2) {
+    if (args1 === args2) return true;
+    if (!args1 || !args2) return false;
+    if (typeof args1 !== "object" || typeof args2 !== "object") return false;
+    const keys1 = Object.keys(args1).sort();
+    const keys2 = Object.keys(args2).sort();
+    if (keys1.length !== keys2.length) return false;
+    for (let i = 0; i < keys1.length; i++) {
+        if (keys1[i] !== keys2[i]) return false;
+        const val1 = args1[keys1[i]];
+        const val2 = args2[keys2[i]];
+        if (typeof val1 === "object" && typeof val2 === "object") {
+            if (!areToolArgumentsEqual(val1, val2)) return false;
+        } else if (val1 !== val2) {
+            return false;
+        }
+    }
+    return true;
+}
 
 export class AdaptiveAgent {
     constructor({ provider, mcpClient, maxRounds, systemPrompt, allowPartialSuccess, toolTimeoutMs } = {}) {
@@ -110,7 +132,7 @@ export class AdaptiveAgent {
             // Case A: Model responded with a final text reply (no tool calls)
             if (toolCalls.length === 0) {
                 concluded = true;
-                finalReply = providerResponse.content || "";
+                finalReply = stripMetaPreamble(providerResponse.content || "");
 
                 // Inspect whether prior tool execution failed without resolution
                 const hasFailures = turnFailures.length > 0;
@@ -297,6 +319,51 @@ export class AdaptiveAgent {
                     });
 
                     continue;
+                }
+
+                // Step 2.5: Guard against duplicate mutation execution
+                // If a mutation tool was already successfully executed with identical arguments in this turn,
+                // reuse the prior successful outcome rather than re-mutating persisted state.
+                if (MUTATION_TOOLS.has(toolName)) {
+                    const priorSuccess = executedTools.find(t =>
+                        t.toolName === toolName &&
+                        !t.isError &&
+                        areToolArgumentsEqual(t.toolArgs, toolArgs)
+                    );
+
+                    if (priorSuccess) {
+                        console.log(`[Agent] Deduplicated duplicate execution of mutation tool "${toolName}" with identical arguments.`);
+                        steps.push({
+                            round,
+                            type: "duplicate_mutation_skipped",
+                            tool: toolName,
+                            arguments: toolArgs,
+                            reusedResult: priorSuccess.content,
+                            timestamp: new Date().toISOString()
+                        });
+
+                        turnSuccesses.push({
+                            toolName,
+                            content: priorSuccess.content
+                        });
+
+                        executedTools.push({
+                            toolName,
+                            toolArgs,
+                            isError: false,
+                            content: priorSuccess.content,
+                            parsedData: priorSuccess.parsedData,
+                            isDeduplicated: true
+                        });
+
+                        conversation.push({
+                            role: "tool",
+                            tool_name: toolName,
+                            content: priorSuccess.content
+                        });
+
+                        continue;
+                    }
                 }
 
                 // Step 3: Execute tool via MCP client with normalized arguments

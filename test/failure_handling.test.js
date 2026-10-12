@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -10,6 +12,10 @@ import { createPlan, calculateDaysRemaining } from "../studypilot-server/planner
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Ensure all failure handling tests run within isolated temporary storage
+const isolatedDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "studypilot-failure-test-"));
+process.env.STUDYPILOT_DATA_DIR = isolatedDataDir;
 
 async function runFailureHandlingSuite() {
     console.log("=== Adaptive AI Agent + StudyPilot: Failure-Handling Test Suite ===");
@@ -23,22 +29,32 @@ async function runFailureHandlingSuite() {
     });
     const transport = new StdioClientTransport({
         command: "node",
-        args: [serverScript]
+        args: [serverScript],
+        env: {
+            ...process.env,
+            STUDYPILOT_DATA_DIR: isolatedDataDir
+        }
     });
-    await mcpClient.connect(transport);
-    console.log("✓ Connected to StudyPilot MCP server for deterministic tool verification");
 
     // Initialize McpClientManager for agent-level tests
     const mcpManager = new McpClientManager({
         command: "node",
-        args: [serverScript]
+        args: [serverScript],
+        env: {
+            STUDYPILOT_DATA_DIR: isolatedDataDir
+        }
     });
-    await mcpManager.connect();
-    console.log("✓ Connected McpClientManager for agent loop tests");
 
-    const availableTools = mcpManager.listTools();
-    const createToolDef = availableTools.find(t => t.name === "create_study_plan");
-    const getToolDef = availableTools.find(t => t.name === "get_study_plan");
+    try {
+        await mcpClient.connect(transport);
+        console.log("✓ Connected to StudyPilot MCP server for deterministic tool verification");
+
+        await mcpManager.connect();
+        console.log("✓ Connected McpClientManager for agent loop tests");
+
+        const availableTools = mcpManager.listTools();
+        const createToolDef = availableTools.find(t => t.name === "create_study_plan");
+        const getToolDef = availableTools.find(t => t.name === "get_study_plan");
 
     // =========================================================================
     // SCENARIO 1: Invalid or Missing Exam Date
@@ -909,13 +925,20 @@ async function runFailureHandlingSuite() {
     );
     console.log("✓ Agent response on timeout verified: success=false, honest timeout report, zero hallucinated results");
 
-    // Clean up connections
-    await mcpClient.close();
-    await mcpManager.disconnect();
-
-    console.log("\n===============================================================================");
-    console.log("ALL FAILURE-HANDLING SCENARIOS & GAP FIXES PASSED DETERMINISTICALLY! (100%)");
-    console.log("===============================================================================");
+        console.log("\n===============================================================================");
+        console.log("ALL FAILURE-HANDLING SCENARIOS & GAP FIXES PASSED DETERMINISTICALLY! (100%)");
+        console.log("===============================================================================");
+    } finally {
+        try {
+            await mcpClient.close();
+        } catch { }
+        try {
+            await mcpManager.disconnect();
+        } catch { }
+        try {
+            fs.rmSync(isolatedDataDir, { recursive: true, force: true });
+        } catch { }
+    }
 }
 
 runFailureHandlingSuite().catch(err => {

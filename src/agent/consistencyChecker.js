@@ -223,7 +223,7 @@ export function extractCanonicalDates(text) {
  */
 export function extractExplicitExamDates(text) {
     if (typeof text !== "string" || !text.trim()) return [];
-    const prefixRegex = /(?:exam\s+date|target\s+exam\s+date|exam\s+day|scheduled\s+exam\s+for|exam\s+is\s+(?:scheduled\s+for|on|set\s+for)|exam\s+on)[*_]*\s*(?:is|on|set\s+for|scheduled\s+for)?\s*[:=–-]?[*_]*\s*/gi;
+    const prefixRegex = /(?:exam\s+date|target\s+exam\s+date|exam\s+day|scheduled\s+exam\s+for|exam\s+is\s+(?:scheduled\s+for|on|set\s+for)|exam\s+(?:will\s+be|takes?\s+place)\s+on|exam\s+on|exam\s*[:=–-])[*_]*\s*(?:is|on|set\s+for|scheduled\s+for)?\s*[:=–-]?[*_]*\s*/gi;
     const explicitDates = new Set();
 
     let match;
@@ -235,41 +235,65 @@ export function extractExplicitExamDates(text) {
         }
     }
 
+    // Also check patterns where date immediately precedes 'exam', e.g. "2026-12-25 exam"
+    const beforeExamRegex = /\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|[A-Za-z]+\s+\d{1,2}(?:st|nd|rd|th)?(?:,)?\s+\d{4}|\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?[A-Za-z]+(?:,)?\s+\d{4})\s+exam\b/gi;
+    let beforeMatch;
+    while ((beforeMatch = beforeExamRegex.exec(text)) !== null) {
+        const d = normalizeDateToISO(beforeMatch[1]);
+        if (d) {
+            explicitDates.add(d);
+        }
+    }
+
     return Array.from(explicitDates);
 }
 
 /**
- * Checks whether text contradicts or omits the expected exam date.
+ * Checks whether user message explicitly requested the exam date.
+ * @param {string} userMessage
+ * @returns {boolean}
+ */
+export function isExamDateRequested(userMessage) {
+    if (typeof userMessage !== "string" || !userMessage.trim()) return false;
+    return /\b(?:exam\s+date|target\s+exam\s+date|exam\s+day|date\s+of\s+(?:the\s+)?exam|when\s+(?:is|'s)\s+(?:the\s+|my\s+)?exam)\b/i.test(userMessage);
+}
+
+/**
+ * Checks whether text explicitly contradicts the expected exam date.
  * Normalizes equivalent representations (e.g. "November 30, 2026", "November 30th, 2026",
  * "Nov 30, 2026", "30 November 2026", "2026-11-30") before comparison.
- * Detects genuinely incorrect or omitted exam dates.
+ * Distinguishes omission from contradiction: a reply that does not mention an exam date
+ * is NOT classified as contradicting the exam date.
+ * If the reply explicitly states an exam date, rejects it only when it conflicts with expectedDateStr.
  * @param {string} text - Final reply text to verify
  * @param {string} expectedDateStr - Ground truth exam date (e.g. "2026-11-30")
- * @returns {boolean} True if exam date is omitted or contradicted, false if equivalent date is present
+ * @returns {boolean} True if a stated exam date conflicts with expectedDateStr, false otherwise
  */
 export function isExamDateContradicted(text, expectedDateStr) {
     if (!expectedDateStr || typeof expectedDateStr !== "string") return false;
-    if (typeof text !== "string" || !text.trim()) return true;
+    if (typeof text !== "string" || !text.trim()) return false;
 
     const targetIso = normalizeDateToISO(expectedDateStr);
     if (!targetIso) {
-        return !text.includes(expectedDateStr);
+        return false;
     }
 
-    // 1. Check if text contains any date representation equivalent to targetIso
-    const datesInReply = extractCanonicalDates(text);
-    const hasEquivalentDate = datesInReply.includes(targetIso);
-
-    if (!hasEquivalentDate) {
-        return true;
-    }
-
-    // 2. If an explicit exam date is stated, ensure it does not contradict targetIso
     const explicitExamDates = extractExplicitExamDates(text);
     if (explicitExamDates.length > 0) {
         const hasMatchingExplicit = explicitExamDates.includes(targetIso);
         const hasContradictoryExplicit = explicitExamDates.some(d => d !== targetIso);
-        if (hasContradictoryExplicit && !hasMatchingExplicit) {
+        if (hasContradictoryExplicit || !hasMatchingExplicit) {
+            return true;
+        }
+        return false;
+    }
+
+    // If no valid dates were extracted, check if text contains an explicit exam date label with non-date text
+    const labelMatch = text.match(/(?:exam\s+date|target\s+exam\s+date|exam\s+day)\s*[:=]\s*([^\n;]+)/i);
+    if (labelMatch) {
+        const candidate = labelMatch[1].trim();
+        const candIso = matchDateAtStart(candidate) || normalizeDateToISO(candidate);
+        if (!candIso || candIso !== targetIso) {
             return true;
         }
     }
@@ -625,6 +649,120 @@ export function formatGroundedRetrievalSummary(planData) {
 }
 
 /**
+ * Leading conversational meta-preamble regex.
+ * Matches model-generated boilerplate phrases like:
+ * - "Here is the final answer to the original user question:"
+ * - "Here is the final answer:"
+ * - "Based on the tool results, here is the final answer:"
+ * - "Based on the verified tool results, here is the answer to your question:"
+ * - "Final answer:"
+ * Supports optional leading/trailing markdown bolding (** or *).
+ * Preserves meaningful user-facing introductory sentences like:
+ * - "Here is your updated study plan for Mathematics and Physics:"
+ * - "Here is an overview of your schedule before the exam on 2026-11-30:"
+ * - "Based on your exam date, you have 49 days remaining."
+ */
+export const META_PREAMBLE_REGEX = /^\s*(?:\*{1,2})?(?:(?:based\s+on\s+(?:the\s+)?(?:verified\s+)?(?:tool\s+results?|tool\s+executions?|tools?)[,\s]+)?(?:here\s+is\s+(?:the|your)\s+(?:final\s+)?answer(?:\s+to\s+(?:the\s+|your\s+)?(?:original\s+)?(?:user\s+)?(?:question|request))?|final\s+answer))(?:[:.]\s*(?:\*{1,2})?|(?:\*{1,2})\s*[:.]?)\s*/i;
+
+/**
+ * Strips leading conversational meta-preambles from model replies, preserving actual answer content and formatting.
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripMetaPreamble(text) {
+    if (typeof text !== "string") return text;
+    return text.replace(META_PREAMBLE_REGEX, "");
+}
+
+/**
+ * Detects whether the reply explicitly asserts a plan-wide total remaining hours
+ * that contradicts data.totalRemainingHours.
+ * @param {string} reply
+ * @param {number} expectedTotal - data.totalRemainingHours
+ * @returns {{ contradicted: boolean, claimedTotal?: number }}
+ */
+export function detectPlanWideTotalRemainingHoursContradiction(reply, expectedTotal) {
+    if (typeof reply !== "string" || typeof expectedTotal !== "number" || isNaN(expectedTotal)) {
+        return { contradicted: false };
+    }
+
+    const prefixRegexes = [
+        /(?:plan-wide\s+)?(?:total|overall)\s+(?:remaining\s+(?:study\s+)?hours?|remaining)(?:\s+(?:for|across|in)\s+(?:the\s+)?(?:entire\s+|whole\s+|all\s+)?(?:plan|subjects))?\s*(?:are|is|=|:)\s*(\d+(?:\.\d+)?)/i,
+        /(?:plan-wide\s+)?(?:total|overall)\s+remaining(?:\s+(?:study\s+)?hours?)?(?:\s+(?:for|across|in)\s+(?:the\s+)?(?:entire\s+|whole\s+|all\s+)?(?:plan|subjects))?\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)?/i,
+        /(?:total|overall)\s+hours?[:\s]+[^\n]*?(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)?\s+remaining/i,
+        /total\s+of\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)?\s+remaining/i,
+        /(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)?\s+(?:total|overall)\s+remaining(?:\s+hours?)?/i
+    ];
+
+    for (const rx of prefixRegexes) {
+        const match = reply.match(rx);
+        if (match && match[1]) {
+            const claimed = parseFloat(match[1]);
+            if (!isNaN(claimed)) {
+                if (Math.abs(claimed - expectedTotal) > 0.2) {
+                    return { contradicted: true, claimedTotal: claimed };
+                }
+            }
+        }
+    }
+
+    return { contradicted: false };
+}
+
+/**
+ * Detects whether the reply asserts a blanket claim that all recent sessions occurred on one date,
+ * but returned recentSessions contains sessions with distinct dates establishing the claim is false.
+ * @param {string} reply
+ * @param {Array} recentSessions
+ * @returns {{ contradicted: boolean, claimedDate?: string, actualDates?: string[] }}
+ */
+export function detectBlanketRecentSessionDateContradiction(reply, recentSessions) {
+    if (typeof reply !== "string" || !Array.isArray(recentSessions) || recentSessions.length === 0) {
+        return { contradicted: false };
+    }
+
+    // Extract all valid normalized ISO dates from recentSessions
+    const validSessionDates = recentSessions
+        .map(s => (s && s.date ? normalizeDateToISO(String(s.date)) : null))
+        .filter(Boolean);
+
+    // If there are no session dates or only 1 distinct date, a blanket single-date claim cannot be contradicted
+    const uniqueDates = [...new Set(validSessionDates)];
+    if (uniqueDates.length <= 1) {
+        return { contradicted: false };
+    }
+
+    // Regexes targeting explicit blanket statements about all recent sessions
+    const blanketPatterns = [
+        /(?:the\s+)?(?:most\s+)?recent\s+sessions?\s+were\s+all\s+(?:completed|recorded|logged|held|conducted)\s+(?:on|in)\s+([^\n]+)/i,
+        /\ball\s+(?:\d+\s+)?(?:recent\s+)?sessions?\s+(?:were\s+all\s+|were\s+|are\s+)?(?:completed|recorded|logged|held|conducted|took\s+place|occurred)\s+(?:on|in)\s+([^\n]+)/i,
+        /\ball\s+sessions?\s+(?:took\s+place|occurred)\s+(?:on|in)\s+([^\n]+)/i
+    ];
+
+    for (const pattern of blanketPatterns) {
+        const match = reply.match(pattern);
+        if (match && match[1]) {
+            const rawAfter = match[1].trim();
+            const claimedIso = matchDateAtStart(rawAfter) || normalizeDateToISO(rawAfter);
+            if (claimedIso) {
+                // If at least one returned recent session date differs from the claimed date,
+                // the returned records establish that the blanket claim is false.
+                const hasMismatch = uniqueDates.some(d => d !== claimedIso);
+                if (hasMismatch) {
+                    return {
+                        contradicted: true,
+                        claimedDate: claimedIso,
+                        actualDates: uniqueDates
+                    };
+                }
+            }
+        }
+    }
+
+    return { contradicted: false };
+}
+
+/**
  * Verifies final answer consistency against executed tools.
  * If the model invented a schedule exceeding daily constraints or contradicting tool totals,
  * generates a verified grounded summary.
@@ -634,6 +772,7 @@ export function formatGroundedRetrievalSummary(planData) {
  * @returns {{ valid: boolean, reason?: string, correctedReply?: string, failure?: boolean }}
  */
 export function verifyFinalAnswerConsistency(finalReply, executedTools = [], userMessage = "") {
+    finalReply = stripMetaPreamble(finalReply);
     if (!Array.isArray(executedTools) || executedTools.length === 0) {
         if (userMessage && isRetrievalIntent(userMessage)) {
             return {
@@ -679,17 +818,23 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
         const requiredSubjects = getRequiredSubjects(subjectsInPlan, userMessage);
         const missingSubject = requiredSubjects.find(sub => !replyMentionsSubject(finalReply, sub));
 
-        // Check if reply contradicts or omits examDate (normalizing equivalent date representations)
+        // Check if reply contradicts or omits examDate (distinguishing omission from contradiction)
         const examDateContradiction = Boolean(data.examDate && isExamDateContradicted(finalReply, data.examDate));
+        const examDateOmission = Boolean(
+            data.examDate &&
+            userMessage &&
+            isExamDateRequested(userMessage) &&
+            !extractCanonicalDates(finalReply).includes(normalizeDateToISO(data.examDate))
+        );
 
         // Check if reply fabricated that no sessions exist when sessions actually exist
-        const hasSessions = (Array.isArray(data.recentSessions) && data.recentSessions.length > 0) || (data.totalSessionsRecorded > 0);
+        const hasSessions = (Array.isArray(data.recentSessions) && data.recentSessions.length > 0) || (data.totalSessionsRecorded > 0) || (Array.isArray(data.sessions) && data.sessions.length > 0);
         const falselyClaimsNoSessions = hasSessions && /\b(?:no\s+sessions?|0\s+sessions?|not\s+recorded\s+any)\b/i.test(finalReply);
 
-        if (missingSubject || examDateContradiction || falselyClaimsNoSessions) {
+        if (missingSubject || examDateContradiction || examDateOmission || falselyClaimsNoSessions) {
             const reason = missingSubject
                 ? `Final reply omitted subject "${missingSubject}" from retrieved plan.`
-                : (examDateContradiction
+                : (examDateContradiction || examDateOmission
                     ? `Final reply omitted or contradicted exam date "${data.examDate}".`
                     : `Final reply falsely claimed no sessions exist when sessions are recorded.`);
             return {
@@ -697,6 +842,31 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 reason,
                 correctedReply: formatGroundedRetrievalSummary(data)
             };
+        }
+
+        // Check if reply contradicts plan-wide total remaining hours
+        if (typeof data.totalRemainingHours === "number") {
+            const totalRemainingCheck = detectPlanWideTotalRemainingHoursContradiction(finalReply, data.totalRemainingHours);
+            if (totalRemainingCheck.contradicted) {
+                return {
+                    valid: false,
+                    reason: `Final reply states total remaining hours as ${totalRemainingCheck.claimedTotal}h, contradicting verified plan-wide total remaining hours of ${data.totalRemainingHours}h.`,
+                    correctedReply: formatGroundedRetrievalSummary(data)
+                };
+            }
+        }
+
+        // Check if reply makes a false blanket claim about all recent session dates
+        const recentSessionsList = data.recentSessions || data.sessions || [];
+        if (Array.isArray(recentSessionsList) && recentSessionsList.length > 0) {
+            const blanketDateCheck = detectBlanketRecentSessionDateContradiction(finalReply, recentSessionsList);
+            if (blanketDateCheck.contradicted) {
+                return {
+                    valid: false,
+                    reason: `Final reply falsely claims all recent sessions were completed on "${blanketDateCheck.claimedDate}", but returned history contains sessions on distinct dates (${blanketDateCheck.actualDates.join(", ")}).`,
+                    correctedReply: formatGroundedRetrievalSummary(data)
+                };
+            }
         }
 
         // Check if user explicitly asked for specific fields and reply omitted them
@@ -739,12 +909,40 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 correctedReply: formatGroundedRetrievalSummary(parsedData)
             };
         }
-        if (parsedData.examDate && isExamDateContradicted(finalReply, parsedData.examDate)) {
+        const examDateContradiction = Boolean(parsedData.examDate && isExamDateContradicted(finalReply, parsedData.examDate));
+        const examDateOmission = Boolean(
+            parsedData.examDate &&
+            userMessage &&
+            isExamDateRequested(userMessage) &&
+            !extractCanonicalDates(finalReply).includes(normalizeDateToISO(parsedData.examDate))
+        );
+        if (examDateContradiction || examDateOmission) {
             return {
                 valid: false,
                 reason: `Final reply omitted or contradicted exam date "${parsedData.examDate}".`,
                 correctedReply: formatGroundedRetrievalSummary(parsedData)
             };
+        }
+        if (typeof parsedData.totalRemainingHours === "number") {
+            const totalRemainingCheck = detectPlanWideTotalRemainingHoursContradiction(finalReply, parsedData.totalRemainingHours);
+            if (totalRemainingCheck.contradicted) {
+                return {
+                    valid: false,
+                    reason: `Final reply states total remaining hours as ${totalRemainingCheck.claimedTotal}h, contradicting verified plan-wide total remaining hours of ${parsedData.totalRemainingHours}h.`,
+                    correctedReply: formatGroundedRetrievalSummary(parsedData)
+                };
+            }
+        }
+        const recentSessionsList = parsedData.recentSessions || parsedData.sessions || [];
+        if (Array.isArray(recentSessionsList) && recentSessionsList.length > 0) {
+            const blanketDateCheck = detectBlanketRecentSessionDateContradiction(finalReply, recentSessionsList);
+            if (blanketDateCheck.contradicted) {
+                return {
+                    valid: false,
+                    reason: `Final reply falsely claims all recent sessions were completed on "${blanketDateCheck.claimedDate}", but returned history contains sessions on distinct dates (${blanketDateCheck.actualDates.join(", ")}).`,
+                    correctedReply: formatGroundedRetrievalSummary(parsedData)
+                };
+            }
         }
     }
 
@@ -787,8 +985,33 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
         const session = parsedData.session || {};
         const subjectProgress = parsedData.subjectProgress || {};
         const subject = subjectProgress.subject || session.subject || toolArgs?.subject;
+        const trimmed = finalReply.trim();
 
-        // 1. Must mention the target subject (handling aliases like Math / Maths for Mathematics)
+        // 1. Detect raw JSON dump or code block representing a study plan or data
+        const isRawJson = (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+            (trimmed.startsWith("```") && (trimmed.includes('"planId"') || trimmed.includes('"examDate"') || trimmed.includes('"subjects"')));
+        if (isRawJson) {
+            return {
+                valid: false,
+                reason: "Final reply was a raw JSON object or code block instead of a grounded session confirmation.",
+                correctedReply: formatGroundedSessionSummary(parsedData, toolArgs)
+            };
+        }
+
+        // 2. Detect fabricated study plan fields (e.g., exam date, daily available study time) not in session result
+        const mentionsFabricatedPlanData = /\bexam\s*date\b/i.test(finalReply) ||
+            /\bexamDate\b/.test(finalReply) ||
+            /\bdaily\s+available\s+study\s+time\b/i.test(finalReply) ||
+            /\bstudy\s+plan\s+details\b/i.test(finalReply);
+        if (mentionsFabricatedPlanData) {
+            return {
+                valid: false,
+                reason: "Final reply presented unrelated study plan details (e.g. exam date) instead of a grounded session confirmation.",
+                correctedReply: formatGroundedSessionSummary(parsedData, toolArgs)
+            };
+        }
+
+        // 3. Must mention the target subject (handling aliases like Math / Maths for Mathematics)
         if (subject && !replyMentionsSubject(finalReply, subject)) {
             return {
                 valid: false,
@@ -797,7 +1020,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
             };
         }
 
-        // 2. Detect generic or unhelpful final responses:
+        // 4. Detect generic or unhelpful final responses:
         // Must mention session/study/completed/missed AND mention hours or progress metrics
         const mentionsSessionOrAction = /\b(?:session|studied|study|recorded|logged|completed|missed)\b/i.test(finalReply);
         const mentionsHoursOrProgress = /\b(?:\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)|progress|%)\b/i.test(finalReply);

@@ -21,6 +21,7 @@ export class McpClientManager {
             args = process.env.MCP_SERVER_ARGS.trim().split(/\s+/);
         }
         this.args = args || null;
+        this.env = config.env || null;
 
         // Configurable tool execution timeout in milliseconds (default: 20 seconds)
         this.toolTimeoutMs = typeof config.toolTimeoutMs === "number"
@@ -111,7 +112,8 @@ export class McpClientManager {
                 cwd: serverCwd,
                 env: {
                     ...process.env,
-                    NODE_PATH: appNodeModules
+                    NODE_PATH: appNodeModules,
+                    ...(this.env || {})
                 }
             });
 
