@@ -1,0 +1,7 @@
+{
+  "name": "studypilot-mcp-server",
+  "version": "1.0.0",
+  "description": "StudyPilot MCP Server for dynamic study planning and adaptation",
+  "main": "server.js",
+  "type": "module"
+}

@@ -1,0 +1,35 @@
+{
+  "name": "adaptive-ai-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node test/argument_normalization.test.js && node test/studypilot_mcp.test.js && node test/failure_handling.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Giriprasad1432/adaptive-ai-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/Giriprasad1432/adaptive-ai-agent/issues"
+  },
+  "homepage": "https://github.com/Giriprasad1432/adaptive-ai-agent#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.7",
+    "expres": "^0.0.5",
+    "express": "^5.3.0",
+    "ollama": "^0.6.4",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

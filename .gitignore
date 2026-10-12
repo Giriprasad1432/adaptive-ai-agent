@@ -8,3 +8,4 @@ build/
 coverage/
 __pycache__/
 .venv/
+powershell.cmd

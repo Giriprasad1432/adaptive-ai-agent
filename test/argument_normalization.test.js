@@ -1,0 +1,1155 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent } from "../src/agent/normalizer.js";
+import { validateToolArguments, verifyToolResult } from "../src/agent/validator.js";
+import { detectDailyScheduleOverrun, verifyFinalAnswerConsistency } from "../src/agent/consistencyChecker.js";
+import { McpClientManager } from "../src/mcp/mcpClient.js";
+import { AdaptiveAgent } from "../src/agent/adaptiveAgent.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+async function runNormalizationSuite() {
+    console.log("=== Adaptive AI Agent: Tool Argument Normalization & Result Verification Suite ===");
+
+    const studyPlanSchema = {
+        name: "create_study_plan",
+        inputSchema: {
+            type: "object",
+            properties: {
+                subjects: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "List of subjects"
+                },
+                examDate: {
+                    type: "string",
+                    description: "Target exam date in YYYY-MM-DD format"
+                },
+                dailyAvailableHours: {
+                    type: "number",
+                    description: "Daily study hours"
+                },
+                priorities: {
+                    type: "object",
+                    additionalProperties: { type: "string" },
+                    description: "Subject priorities"
+                },
+                planId: {
+                    type: "string",
+                    description: "Plan identifier"
+                }
+            },
+            required: ["subjects", "examDate", "dailyAvailableHours"]
+        }
+    };
+
+    // -------------------------------------------------------------
+    // Test 1: Unit tests for normalizeToolArguments
+    // -------------------------------------------------------------
+    console.log("\n--- Test 1: Unit Tests for normalizeToolArguments ---");
+
+    const rawReproductionArgs = {
+        examDate: "2026-11-30",
+        dailyAvailableHours: "3",
+        priorities: "{\"Mathematics\":\"high\",\"Physics\":\"medium\",\"Chemistry\":\"low\"}",
+        subjects: "[\"Mathematics\",\"Physics\",\"Chemistry\"]",
+        planId: "default"
+    };
+
+    const normalized = normalizeToolArguments(studyPlanSchema, rawReproductionArgs);
+
+    // 1.1 Check subjects array
+    assert.ok(Array.isArray(normalized.subjects), "subjects should be normalized to an Array");
+    assert.deepEqual(
+        normalized.subjects,
+        ["Mathematics", "Physics", "Chemistry"],
+        "subjects should be parsed into clean string array without JSON quotes or brackets"
+    );
+    console.log("✓ JSON-stringified array normalized:", normalized.subjects);
+
+    // 1.2 Check dailyAvailableHours
+    assert.equal(typeof normalized.dailyAvailableHours, "number", "dailyAvailableHours should be converted to number");
+    assert.equal(normalized.dailyAvailableHours, 3, "dailyAvailableHours should equal numeric 3");
+    console.log("✓ Numeric string normalized to number:", normalized.dailyAvailableHours);
+
+    // 1.3 Check priorities object
+    assert.equal(typeof normalized.priorities, "object", "priorities should be normalized to an Object");
+    assert.equal(normalized.priorities.Mathematics, "high", "Mathematics priority should be high");
+    assert.equal(normalized.priorities.Physics, "medium", "Physics priority should be medium");
+    assert.equal(normalized.priorities.Chemistry, "low", "Chemistry priority should be low");
+    console.log("✓ JSON-stringified object normalized:", normalized.priorities);
+
+    // 1.4 Check preserved string fields
+    assert.equal(typeof normalized.examDate, "string", "examDate should remain a string");
+    assert.equal(normalized.examDate, "2026-11-30", "examDate value should be preserved exactly");
+    assert.equal(normalized.planId, "default", "planId string should be preserved");
+    console.log("✓ String values preserved without coercion:", normalized.examDate, normalized.planId);
+
+    // 1.5 Edge cases: Malformed array items with stray brackets and quotes
+    const malformedArray = ['["Mathematics"', '"Physics"', 'Chemistry]'];
+    const cleanedArray = cleanStringArray(malformedArray);
+    assert.deepEqual(cleanedArray, ["Mathematics", "Physics", "Chemistry"]);
+    console.log("✓ Malformed array elements cleaned:", cleanedArray);
+
+    // 1.6 Numeric string for string property must NOT be converted to number
+    const stringOnlySchema = {
+        inputSchema: {
+            properties: {
+                postalCode: { type: "string" },
+                code: { type: "string" }
+            }
+        }
+    };
+    const preservedResult = normalizeToolArguments(stringOnlySchema, { postalCode: "01234", code: "42" });
+    assert.equal(typeof preservedResult.postalCode, "string");
+    assert.equal(preservedResult.postalCode, "01234");
+    assert.equal(typeof preservedResult.code, "string");
+    assert.equal(preservedResult.code, "42");
+    console.log("✓ Numeric string for string schema preserved as string:", preservedResult);
+
+    // 1.7 Parse exact Python-style dictionary string for priorities
+    const pythonDictStr = "{'Mathematics': 'high', 'Physics': 'medium', 'Chemistry': 'low'}";
+    const parsedPythonDict = parsePythonDictOrRelaxedJson(pythonDictStr);
+    assert.ok(parsedPythonDict && typeof parsedPythonDict === "object", "Python-style dict should parse into an object");
+    assert.equal(parsedPythonDict.Mathematics, "high");
+    assert.equal(parsedPythonDict.Physics, "medium");
+    assert.equal(parsedPythonDict.Chemistry, "low");
+
+    const normalizedPythonArgs = normalizeToolArguments(studyPlanSchema, {
+        subjects: "[\"Mathematics\", \"Physics\", \"Chemistry\"]",
+        dailyAvailableHours: "3",
+        examDate: "2026-11-30",
+        priorities: pythonDictStr
+    });
+    assert.equal(typeof normalizedPythonArgs.priorities, "object");
+    assert.deepEqual(normalizedPythonArgs.priorities, {
+        Mathematics: "high",
+        Physics: "medium",
+        Chemistry: "low"
+    });
+    console.log("✓ Exact Python-style dictionary string normalized into object:", normalizedPythonArgs.priorities);
+
+    // 1.8 Rejecting malformed or unsafe object strings
+    assert.equal(parsePythonDictOrRelaxedJson("{'Mathematics': "), null, "Malformed unclosed object string must return null");
+    assert.equal(parsePythonDictOrRelaxedJson("__import__('os').system('ls')"), null, "Unsafe expression must return null");
+    assert.equal(parsePythonDictOrRelaxedJson("{'a': eval('1')}"), null, "Unsafe eval expression must return null");
+
+    const malformedObjectNormalized = normalizeToolArguments(studyPlanSchema, {
+        priorities: "{'Mathematics': "
+    });
+    assert.equal(typeof malformedObjectNormalized.priorities, "string", "Unparseable string must not be converted to invalid object");
+    const malformedValidation = validateToolArguments(studyPlanSchema, malformedObjectNormalized);
+    assert.equal(malformedValidation.valid, false, "Malformed object string must fail schema validation");
+    console.log("✓ Malformed and unsafe object strings safely rejected");
+
+    // -------------------------------------------------------------
+    // Test 2: Unit tests for validateToolArguments
+    // -------------------------------------------------------------
+    console.log("\n--- Test 2: Unit Tests for validateToolArguments ---");
+
+    // 2.1 Valid normalized arguments should pass
+    const validCheck = validateToolArguments(studyPlanSchema, normalized);
+    assert.equal(validCheck.valid, true, "Valid normalized arguments must pass validation");
+    console.log("✓ Normalized arguments passed validation");
+
+    // 2.2 Missing required field should fail with actionable message
+    const missingCheck = validateToolArguments(studyPlanSchema, {
+        subjects: ["Mathematics"],
+        dailyAvailableHours: 3
+    });
+    assert.equal(missingCheck.valid, false);
+    assert.ok(missingCheck.error.includes('Missing required parameter "examDate"'));
+    console.log("✓ Missing required parameter flagged:", missingCheck.error);
+
+    // 2.3 Malformed artifacts in subject names should fail
+    const corruptedSubjectCheck = validateToolArguments(studyPlanSchema, {
+        subjects: ['["Mathematics"', 'Physics'],
+        examDate: "2026-11-30",
+        dailyAvailableHours: 3
+    });
+    assert.equal(corruptedSubjectCheck.valid, false);
+    assert.ok(corruptedSubjectCheck.error.includes("quotation, bracket, or escape artifacts"));
+    console.log("✓ Malformed subject names rejected with actionable feedback:", corruptedSubjectCheck.error);
+
+    // -------------------------------------------------------------
+    // Test 3: Unit tests for verifyToolResult
+    // -------------------------------------------------------------
+    console.log("\n--- Test 3: Unit Tests for verifyToolResult ---");
+
+    // 3.1 Result with malformed subject names should be rejected
+    const malformedResult = {
+        isError: false,
+        content: JSON.stringify({
+            message: "Study plan created",
+            subjectAllocations: {
+                '["Mathematics"': { priority: "medium", allocatedHours: 10 },
+                '"Physics"': { priority: "medium", allocatedHours: 10 },
+                'Chemistry]': { priority: "medium", allocatedHours: 10 }
+            }
+        })
+    };
+    const malformedVerification = verifyToolResult("create_study_plan", normalized, malformedResult);
+    assert.equal(malformedVerification.valid, false, "Result with malformed subject names must fail verification");
+    assert.ok(malformedVerification.error.includes("malformed subject names"));
+    console.log("✓ Rejected malformed subjects in tool result:", malformedVerification.error);
+
+    // 3.2 Result with incorrect priorities should be rejected
+    const wrongPriorityResult = {
+        isError: false,
+        content: JSON.stringify({
+            message: "Study plan created",
+            subjectAllocations: {
+                Mathematics: { priority: "medium", allocatedHours: 10 },
+                Physics: { priority: "medium", allocatedHours: 10 },
+                Chemistry: { priority: "medium", allocatedHours: 10 }
+            }
+        })
+    };
+    const wrongPrioVerification = verifyToolResult("create_study_plan", normalized, wrongPriorityResult);
+    assert.equal(wrongPrioVerification.valid, false, "Result with mismatched priorities must fail verification");
+    assert.ok(wrongPrioVerification.error.includes("Priority mismatch for subject \"Mathematics\""));
+    console.log("✓ Rejected incorrect priorities in tool result:", wrongPrioVerification.error);
+
+    // 3.3 Valid result with correct priorities should pass
+    const correctResult = {
+        isError: false,
+        content: JSON.stringify({
+            message: "Study plan created",
+            subjectAllocations: {
+                Mathematics: { priority: "high", allocatedHours: 30 },
+                Physics: { priority: "medium", allocatedHours: 20 },
+                Chemistry: { priority: "low", allocatedHours: 10 }
+            }
+        })
+    };
+    const correctVerification = verifyToolResult("create_study_plan", normalized, correctResult);
+    assert.equal(correctVerification.valid, true, "Clean result with correct priorities must pass verification");
+    console.log("✓ Verified clean result with correct priorities passed verification");
+
+    // -------------------------------------------------------------
+    // Test 4: Real MCP Tool Integration Test with Exact Reproduction Args
+    // -------------------------------------------------------------
+    console.log("\n--- Test 4: Real MCP Execution with Exact Reproduction Arguments ---");
+
+    const serverScript = path.resolve(__dirname, "../studypilot-server/server.js");
+    const mcpManager = new McpClientManager({
+        command: "node",
+        args: [serverScript]
+    });
+
+    const conn = await mcpManager.connect();
+    assert.equal(conn.connected, true, "MCP client must connect successfully");
+
+    const reproductionPlanId = `repro_plan_${Date.now()}`;
+    const mcpCallResult = await mcpManager.callTool("create_study_plan", {
+        examDate: "2026-11-30",
+        dailyAvailableHours: "3",
+        priorities: "{\"Mathematics\":\"high\",\"Physics\":\"medium\",\"Chemistry\":\"low\"}",
+        subjects: "[\"Mathematics\",\"Physics\",\"Chemistry\"]",
+        planId: reproductionPlanId
+    });
+
+    assert.equal(Boolean(mcpCallResult.isError), false, "Tool call should succeed without error");
+    const planSummary = JSON.parse(mcpCallResult.content);
+
+    // Assert clean subject names
+    const createdSubjects = Object.keys(planSummary.subjectAllocations);
+    assert.deepEqual(createdSubjects, ["Mathematics", "Physics", "Chemistry"]);
+    for (const sub of createdSubjects) {
+        assert.ok(!sub.includes('"') && !sub.includes("[") && !sub.includes("]") && !sub.includes("\\"),
+            `Subject "${sub}" must be completely clean without quote/bracket artifacts`
+        );
+    }
+    console.log("✓ MCP execution created clean subjects:", createdSubjects);
+
+    // Assert correct priorities assigned
+    assert.equal(planSummary.subjectAllocations.Mathematics.priority, "high");
+    assert.equal(planSummary.subjectAllocations.Physics.priority, "medium");
+    assert.equal(planSummary.subjectAllocations.Chemistry.priority, "low");
+    console.log("✓ MCP execution assigned exact requested priorities: Math=high, Physics=medium, Chem=low");
+
+    // Assert allocated hours correspond to priorities: Math > Physics > Chem
+    const mathHours = planSummary.subjectAllocations.Mathematics.allocatedHours;
+    const physHours = planSummary.subjectAllocations.Physics.allocatedHours;
+    const chemHours = planSummary.subjectAllocations.Chemistry.allocatedHours;
+    assert.ok(mathHours > physHours, `Math (${mathHours}h) should receive more hours than Physics (${physHours}h)`);
+    assert.ok(physHours > chemHours, `Physics (${physHours}h) should receive more hours than Chem (${chemHours}h)`);
+    console.log(`✓ Hours allocated by priority: Math=${mathHours}h, Physics=${physHours}h, Chem=${chemHours}h`);
+
+    // -------------------------------------------------------------
+    // Test 5: End-to-End Test with AdaptiveAgent Loop (Live Python-style Priorities Reproduction)
+    // -------------------------------------------------------------
+    console.log("\n--- Test 5: End-to-End Test with AdaptiveAgent (Python-style Priorities String) ---");
+
+    // Mock Provider mimicking model returning Python-style priorities string from confirmed live reproduction
+    const mockProvider = {
+        turn: 0,
+        async chat({ messages, tools }) {
+            this.turn++;
+            if (this.turn === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "create_study_plan",
+                            arguments: {
+                                examDate: "2026-11-30",
+                                dailyAvailableHours: "3",
+                                priorities: "{'Mathematics': 'high', 'Physics': 'medium', 'Chemistry': 'low'}",
+                                subjects: "[\"Mathematics\", \"Physics\", \"Chemistry\"]",
+                                planId: `agent_e2e_${Date.now()}`
+                            }
+                        }
+                    ],
+                    content: "I will create your study plan."
+                };
+            }
+            return {
+                toolCalls: [],
+                content: "I have successfully created your study plan for Mathematics (high priority), Physics (medium priority), and Chemistry (low priority)."
+            };
+        }
+    };
+
+    const agent = new AdaptiveAgent({
+        provider: mockProvider,
+        mcpClient: mcpManager,
+        maxRounds: 4
+    });
+
+    const agentResult = await agent.run({
+        message: "Create a study plan for Mathematics, Physics, and Chemistry, exam date 2026-11-30, 3 daily hours, priorities high/medium/low."
+    });
+
+    assert.equal(agentResult.success, true, "Agent run should succeed with Python-style priorities string");
+    assert.ok(agentResult.reply.includes("Mathematics") && agentResult.reply.includes("Physics"));
+    console.log("✓ AdaptiveAgent normalized Python-style priorities, executed tool end-to-end, and reported valid success");
+
+    // -------------------------------------------------------------
+    // Test 6: Agent Refusal to Claim Success when Tool Validation Fails
+    // -------------------------------------------------------------
+    console.log("\n--- Test 6: Agent Clearly Reports Failure and Suppresses Invented Plans on Tool Failure ---");
+
+    const faultyProvider = {
+        turn: 0,
+        async chat() {
+            this.turn++;
+            if (this.turn === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "create_study_plan",
+                            arguments: {
+                                // Missing required fields
+                                subjects: []
+                            }
+                        }
+                    ]
+                };
+            }
+            // Model attempts to falsely claim success and invent a plan despite tool validation error
+            return {
+                toolCalls: [],
+                content: "I can create a study plan for you. Here's a plan tailored to your needs:\n\n**Days 1-50**\n\n* 9:00 - 12:00: Mathematics (3 hours)"
+            };
+        }
+    };
+
+    const strictAgent = new AdaptiveAgent({
+        provider: faultyProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const strictResult = await strictAgent.run({
+        message: "Create an empty plan."
+    });
+
+    assert.equal(strictResult.success, false, "Agent must NOT report success when tool validation failed");
+    assert.ok(strictResult.reply.startsWith("Action Failed:"), "Failure explanation must be placed first");
+    assert.ok(strictResult.reply.includes("could not be completed successfully"), "Agent reply must communicate the failure");
+    assert.ok(!strictResult.reply.includes("Here's a plan tailored to your needs"), "Reply must NOT return an invented completed plan");
+    assert.ok(!strictResult.reply.includes("9:00 - 12:00"), "Reply must NOT return an invented daily schedule");
+    console.log("✓ AdaptiveAgent put failure explanation first and suppressed invented plan/schedule");
+
+    // -------------------------------------------------------------
+    // Test 7: Unit tests for detectDailyScheduleOverrun
+    // -------------------------------------------------------------
+    console.log("\n--- Test 7: Unit Tests for detectDailyScheduleOverrun ---");
+
+    // 7.1 Exact reproduction output: 3h Math + 1h Physics + 0.5h Chem = 4.5h > 3h
+    const reproductionOutput = `Based on the study plan, here is a suggested daily schedule:
+
+**Days 1-50**
+
+* 9:00 - 12:00: Mathematics (3 hours)
+* 1:00 - 2:00: Physics (1 hour)
+* 2:00 - 2:30: Chemistry (0.5 hours)
+
+Adjust as needed for your learning style.`;
+
+    const overrunCheck = detectDailyScheduleOverrun(reproductionOutput, 3);
+    assert.equal(overrunCheck.exceeds, true, "Should detect daily schedule exceeding 3-hour limit");
+    assert.equal(overrunCheck.detectedHours, 4.5, "Should correctly calculate total scheduled daily hours as 4.5h");
+    console.log(`✓ Detected schedule overrun: ${overrunCheck.detectedHours}h > 3h limit (${overrunCheck.details})`);
+
+    // 7.2 Explicit statement of daily total
+    const explicitText = "Your daily schedule requires a total of 4.5 hours per day.";
+    const explicitOverrun = detectDailyScheduleOverrun(explicitText, 3);
+    assert.equal(explicitOverrun.exceeds, true);
+    assert.equal(explicitOverrun.detectedHours, 4.5);
+    console.log("✓ Detected explicit daily total overrun:", explicitOverrun.details);
+
+    // 7.3 Valid schedule within limits
+    const validScheduleText = `Study Plan Summary:
+- Mathematics (High Priority): 75 hours total (~1.5 hrs/day)
+- Physics (Medium Priority): 50 hours total (~1.0 hr/day)
+- Chemistry (Low Priority): 25 hours total (~0.5 hrs/day)
+Total daily study time: 3 hours/day.`;
+
+    const validCheckOverrun = detectDailyScheduleOverrun(validScheduleText, 3);
+    assert.equal(validCheckOverrun.exceeds, false, "Valid schedule within 3h must not be flagged");
+    console.log("✓ Valid schedule within 3h daily limit accepted cleanly");
+
+    // -------------------------------------------------------------
+    // Test 8: Agent Regression Test: Proving Agent Cannot Return Schedule Exceeding Available Hours
+    // -------------------------------------------------------------
+    console.log("\n--- Test 8: Agent Regression Test: Blocking Schedules Exceeding Daily Limit ---");
+
+    // Provider that attempts to return the flawed 4.5-hour schedule after creating a 3-hour plan
+    const overcommittingProvider = {
+        turn: 0,
+        async chat() {
+            this.turn++;
+            if (this.turn === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "create_study_plan",
+                            arguments: {
+                                examDate: "2026-11-30",
+                                dailyAvailableHours: "3",
+                                priorities: "{\"Mathematics\":\"high\",\"Physics\":\"medium\",\"Chemistry\":\"low\"}",
+                                subjects: "[\"Mathematics\",\"Physics\",\"Chemistry\"]",
+                                planId: `repro_agent_guard_${Date.now()}`
+                            }
+                        }
+                    ],
+                    content: "Creating your plan."
+                };
+            }
+            // Model generates the flawed schedule from reproduction
+            return {
+                toolCalls: [],
+                content: `Based on the study plan, here is a suggested daily schedule:
+
+**Days 1-50**
+
+* 9:00 - 12:00: Mathematics (3 hours)
+* 1:00 - 2:00: Physics (1 hour)
+* 2:00 - 2:30: Chemistry (0.5 hours)
+
+Adjust as needed for your learning style.`
+            };
+        }
+    };
+
+    const guardedAgent = new AdaptiveAgent({
+        provider: overcommittingProvider,
+        mcpClient: mcpManager,
+        maxRounds: 4
+    });
+
+    const guardedResult = await guardedAgent.run({
+        message: "Create a study plan for Mathematics, Physics, and Chemistry. Exam date 2026-11-30, 3 hours per day."
+    });
+
+    assert.equal(guardedResult.success, true, "Agent run should succeed");
+    
+    // Assert the reply does NOT suggest 4.5 hours or violate the 3-hour limit
+    assert.ok(!/\b4\.5\s*(?:hours|hrs)/i.test(guardedResult.reply), "Reply must not suggest 4.5 hours per day");
+    assert.ok(!guardedResult.reply.includes("9:00 - 12:00: Mathematics (3 hours)"), "Reply must not contain the contradictory micro-schedule");
+
+    // Assert the reply is grounded in verified tool results
+    assert.ok(guardedResult.reply.includes("3 hours/day"), "Reply must state the verified 3 hours/day limit");
+    assert.ok(guardedResult.reply.includes("Mathematics"), "Reply must state Mathematics");
+    assert.ok(guardedResult.reply.includes("Physics"), "Reply must state Physics");
+    assert.ok(guardedResult.reply.includes("Chemistry"), "Reply must state Chemistry");
+
+    // Assert the agent recorded a final_answer_grounded step
+    const groundedStep = guardedResult.steps.find(s => s.type === "final_answer_grounded");
+    assert.ok(groundedStep, "Agent must record a final_answer_grounded step when correcting the reply");
+    assert.ok(groundedStep.reason.includes("exceeds"), "Reason must cite exceeding the daily limit");
+    console.log("✓ Guarded agent successfully intercepted contradictory 4.5h schedule and replaced it with verified grounded summary!");
+    console.log(`  Grounded step recorded: "${groundedStep.reason}"`);
+
+    // -------------------------------------------------------------
+    // Test 9: Explicit Plan Identifier Preservation & Unknown Plan Handling
+    // -------------------------------------------------------------
+    console.log("\n--- Test 9: Explicit Plan Identifier Preservation & Unknown Plan Handling ---");
+
+    // 9.1 Unit tests for extractExplicitPlanId
+    console.log("\n[Test 9.1] Unit tests for extractExplicitPlanId with various user phrasing");
+    assert.equal(extractExplicitPlanId('Record a missed Mathematics session for planId "adaptive-demo"'), "adaptive-demo");
+    assert.equal(extractExplicitPlanId('Record a missed Mathematics session for planId adaptive-demo'), "adaptive-demo");
+    assert.equal(extractExplicitPlanId('Record a missed Mathematics session for planId: custom-fall-2026'), "custom-fall-2026");
+    assert.equal(extractExplicitPlanId('In study plan "biology-prep", mark session completed'), "biology-prep");
+    assert.equal(extractExplicitPlanId('Please adapt study plan for plan physics-intensive'), "physics-intensive");
+    assert.equal(extractExplicitPlanId('Please record session', [
+        { role: "assistant", content: 'Study plan "history-101" created successfully!' }
+    ]), "history-101");
+    // Does not match tool names
+    assert.equal(extractExplicitPlanId('Please invoke adapt_study_plan'), null);
+    assert.equal(extractExplicitPlanId('Just record my study session'), null);
+    console.log("✓ extractExplicitPlanId successfully extracts explicit identifiers without hardcoding");
+
+    // Tool schemas
+    const recordSessionSchema = {
+        name: "record_study_session",
+        inputSchema: {
+            type: "object",
+            properties: {
+                subject: { type: "string" },
+                hoursSpent: { type: "number" },
+                status: { type: "string" },
+                planId: { type: "string" }
+            },
+            required: ["subject", "hoursSpent", "status"]
+        }
+    };
+
+    const getPlanSchema = {
+        name: "get_study_plan",
+        inputSchema: {
+            type: "object",
+            properties: {
+                planId: { type: "string" }
+            }
+        }
+    };
+
+    const adaptPlanSchema = {
+        name: "adapt_study_plan",
+        inputSchema: {
+            type: "object",
+            properties: {
+                planId: { type: "string" },
+                reason: { type: "string" },
+                newExamDate: { type: "string" },
+                newDailyAvailableHours: { type: "number" }
+            }
+        }
+    };
+
+    // 9.2 Regression: record_study_session preserves explicit planId when model outputs adapt_study_plan
+    console.log("\n[Test 9.2] Regression: record_study_session preserves explicit planId when model generates tool name");
+    const rawRecordArgsWithToolName = {
+        subject: "Mathematics",
+        hoursSpent: "0",
+        status: "missed",
+        planId: "adapt_study_plan"
+    };
+    const normRecord = normalizeToolArguments(recordSessionSchema, rawRecordArgsWithToolName, {
+        message: "Record a missed Mathematics session for planId 'adaptive-demo'",
+        knownTools: ["record_study_session", "adapt_study_plan", "get_study_plan", "create_study_plan"]
+    });
+    assert.equal(normRecord.planId, "adaptive-demo", "Explicit planId 'adaptive-demo' must be preserved, replacing tool name 'adapt_study_plan'");
+    console.log("✓ record_study_session normalized planId:", normRecord.planId);
+
+    // 9.3 Regression: get_study_plan preserves explicit planId when model outputs get_study_plan or omits planId
+    console.log("\n[Test 9.3] Regression: get_study_plan preserves explicit planId when model generates tool name");
+    const rawGetArgsWithToolName = {
+        planId: "get_study_plan"
+    };
+    const normGet = normalizeToolArguments(getPlanSchema, rawGetArgsWithToolName, {
+        message: "Get study plan for planId 'custom-prep-42'",
+        knownTools: ["record_study_session", "adapt_study_plan", "get_study_plan", "create_study_plan"]
+    });
+    assert.equal(normGet.planId, "custom-prep-42", "Explicit planId 'custom-prep-42' must be preserved");
+    console.log("✓ get_study_plan normalized planId:", normGet.planId);
+
+    // 9.4 Regression: adapt_study_plan preserves explicit planId when model outputs adapt_study_plan
+    console.log("\n[Test 9.4] Regression: adapt_study_plan preserves explicit planId when model generates tool name");
+    const rawAdaptArgsWithToolName = {
+        planId: "adapt_study_plan",
+        reason: "Missed Mathematics session"
+    };
+    const normAdapt = normalizeToolArguments(adaptPlanSchema, rawAdaptArgsWithToolName, {
+        message: "Please adapt study plan for planId 'finals-rush'",
+        knownTools: ["record_study_session", "adapt_study_plan", "get_study_plan", "create_study_plan"]
+    });
+    assert.equal(normAdapt.planId, "finals-rush", "Explicit planId 'finals-rush' must be preserved");
+    console.log("✓ adapt_study_plan normalized planId:", normAdapt.planId);
+
+    // 9.5 End-to-End Agent: Multi-turn plan creation followed by session recording with buggy model argument
+    console.log("\n[Test 9.5] E2E Agent: Multi-turn explicit planId preserved across live MCP execution");
+    const customTestPlanId = `adaptive_regress_${Date.now()}`;
+    
+    // Step A: Create the plan using real MCP client
+    const createRes = await mcpManager.callTool("create_study_plan", {
+        planId: customTestPlanId,
+        subjects: ["Mathematics", "Physics"],
+        examDate: "2026-11-30",
+        dailyAvailableHours: 3
+    });
+    assert.equal(createRes.isError, false, "Test plan creation should succeed");
+
+    // Step B: Agent executes record_study_session with model generating planId: 'adapt_study_plan'
+    const buggyRecordProvider = {
+        callCount: 0,
+        async chat({ messages }) {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "record_study_session",
+                            arguments: {
+                                subject: "Mathematics",
+                                hoursSpent: 0,
+                                status: "missed",
+                                planId: "adapt_study_plan" // Buggy model output from reproduction!
+                            }
+                        }
+                    ],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: `Successfully recorded missed Mathematics session for plan ${customTestPlanId}.`
+            };
+        }
+    };
+
+    const preservationAgent = new AdaptiveAgent({
+        provider: buggyRecordProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const preservationResult = await preservationAgent.run({
+        message: `Record a missed Mathematics session for planId "${customTestPlanId}"`
+    });
+
+    assert.equal(preservationResult.success, true, "Agent run must succeed by preserving explicit planId");
+    const preservedStep = preservationResult.steps.find(s => s.type === "identifier_preserved");
+    assert.ok(preservedStep, "Agent must record an identifier_preserved step");
+    assert.equal(preservedStep.preservedValue, customTestPlanId, "Preserved value must match user planId");
+    assert.equal(preservedStep.rawArgument, "adapt_study_plan", "Raw argument was adapt_study_plan");
+    console.log(`✓ Agent intercepted buggy 'adapt_study_plan' and successfully recorded session into "${customTestPlanId}"!`);
+
+    // 9.6 Unknown plan ID fails honestly without being coerced to 'default'
+    console.log("\n[Test 9.6] Unknown plan ID fails honestly without being silently replaced with 'default'");
+    const unknownPlanId = "nonexistent_plan_404_xyz";
+    const unknownProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "get_study_plan",
+                            arguments: { planId: unknownPlanId }
+                        }
+                    ],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: "Here is your plan data."
+            };
+        }
+    };
+
+    const unknownAgent = new AdaptiveAgent({
+        provider: unknownProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const unknownResult = await unknownAgent.run({
+        message: `Get study plan for planId "${unknownPlanId}"`
+    });
+
+    assert.equal(unknownResult.success, false, "Unknown plan ID must result in success=false");
+    assert.ok(unknownResult.reply.includes("Action Failed") || unknownResult.reply.includes(unknownPlanId), "Reply must indicate honest failure");
+    assert.ok(!unknownResult.reply.includes('Study plan "default"'), "Must never claim default plan was retrieved");
+    console.log("✓ Unknown plan ID failed honestly without defaulting:", unknownResult.reply.split("\n")[0]);
+
+    // 9.7 Tool name generated WITHOUT explicit user planId is strictly rejected by validator
+    console.log("\n[Test 9.7] Tool name generated without explicit user planId is strictly rejected by validator");
+    const noIdProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "record_study_session",
+                            arguments: {
+                                subject: "Mathematics",
+                                hoursSpent: 2,
+                                status: "completed",
+                                planId: "adapt_study_plan" // Hallucinated tool name, but user did NOT specify any planId
+                            }
+                        }
+                    ],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: "Done."
+            };
+        }
+    };
+
+    const noIdAgent = new AdaptiveAgent({
+        provider: noIdProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const noIdResult = await noIdAgent.run({
+        message: "Record a 2-hour session for Mathematics." // No planId specified by user
+    });
+
+    assert.equal(noIdResult.success, false, "Must fail because adapt_study_plan cannot be used as planId");
+    assert.ok(
+        noIdResult.reply.includes("cannot be used as a plan ID") || noIdResult.reply.includes("Action Failed"),
+        "Honest validation error must be reported"
+    );
+    console.log("✓ Tool name without user plan ID strictly rejected without falling back to 'default'");
+
+    // -------------------------------------------------------------
+    // Test 10: adapt_study_plan Optional Argument Normalization & Field Preservation Suite
+    // -------------------------------------------------------------
+    console.log("\n--- Test 10: adapt_study_plan Optional Argument Normalization & Field Preservation Suite ---");
+
+    // 10.1 Exam date unchanged: omit newExamDate
+    console.log("\n[Test 10.1] Exam date unchanged: omit newExamDate and newDailyAvailableHours when empty/unspecified");
+    const adaptRawUnchanged = {
+        planId: "adaptive-demo",
+        reason: "Missed Mathematics session",
+        newExamDate: "",
+        newDailyAvailableHours: ""
+    };
+    const normUnchanged = normalizeToolArguments(adaptPlanSchema, adaptRawUnchanged, {
+        message: "Adapt study plan for planId 'adaptive-demo'. Keep exam date unchanged.",
+        knownTools: ["adapt_study_plan", "create_study_plan", "get_study_plan", "record_study_session"]
+    });
+    assert.equal("newExamDate" in normUnchanged, false, "newExamDate must be completely omitted when empty");
+    assert.equal("newDailyAvailableHours" in normUnchanged, false, "newDailyAvailableHours must be completely omitted when empty");
+    assert.equal(normUnchanged.planId, "adaptive-demo", "planId must be preserved");
+    assert.equal(normUnchanged.reason, "Missed Mathematics session", "reason must be preserved");
+    
+    // Check validation of omitted optional fields passes
+    const valUnchanged = validateToolArguments(adaptPlanSchema, normUnchanged);
+    assert.equal(valUnchanged.valid, true, "Validation must pass when optional newExamDate and newDailyAvailableHours are omitted");
+    console.log("✓ Omitted optional fields cleanly excluded from normalized arguments and passed validation");
+
+    // 10.2 Valid new exam date: accept it
+    console.log("\n[Test 10.2] Valid new exam date: accept and preserve");
+    const adaptRawValidDate = {
+        planId: "adaptive-demo",
+        reason: "Exam postponed by school",
+        newExamDate: "2026-12-25"
+    };
+    const normValidDate = normalizeToolArguments(adaptPlanSchema, adaptRawValidDate);
+    assert.equal(normValidDate.newExamDate, "2026-12-25", "newExamDate must be preserved when provided");
+    const valValidDate = validateToolArguments(adaptPlanSchema, normValidDate, { referenceDate: "2026-10-15" });
+    assert.equal(valValidDate.valid, true, "Validation must pass for valid future YYYY-MM-DD date");
+    console.log("✓ Valid newExamDate accepted:", normValidDate.newExamDate);
+
+    // 10.3 Invalid nonempty exam date: reject it
+    console.log("\n[Test 10.3] Invalid nonempty exam date: reject with clear error");
+    const adaptRawInvalidDate = {
+        planId: "adaptive-demo",
+        reason: "Exam changed",
+        newExamDate: "not-a-valid-date"
+    };
+    const normInvalidDate = normalizeToolArguments(adaptPlanSchema, adaptRawInvalidDate);
+    assert.equal(normInvalidDate.newExamDate, "not-a-valid-date", "Invalid date string must not be erased so it can be validated");
+    const valInvalidDate = validateToolArguments(adaptPlanSchema, normInvalidDate);
+    assert.equal(valInvalidDate.valid, false, "Validation must fail for invalid date format");
+    assert.ok(valInvalidDate.error.includes("YYYY-MM-DD"), "Error message must require YYYY-MM-DD format");
+
+    // Past date rejection
+    const adaptRawPastDate = {
+        planId: "adaptive-demo",
+        newExamDate: "2020-01-01"
+    };
+    const normPastDate = normalizeToolArguments(adaptPlanSchema, adaptRawPastDate);
+    const valPastDate = validateToolArguments(adaptPlanSchema, normPastDate, { referenceDate: "2026-10-15" });
+    assert.equal(valPastDate.valid, false, "Validation must fail for past date");
+    assert.ok(valPastDate.error.includes("past"), "Error must cite past date");
+    console.log("✓ Invalid and past dates strictly rejected by validator");
+
+    // 10.4 Empty optional date: normalize it to omission, or reject it clearly before tool execution if unnormalized
+    console.log("\n[Test 10.4] Empty optional date: normalize to omission or reject clearly if unnormalized");
+    // Normalization to omission
+    const normNullDate = normalizeToolArguments(adaptPlanSchema, { newExamDate: "null", newDailyAvailableHours: "undefined" });
+    assert.equal("newExamDate" in normNullDate, false, "'null' string normalized to omission");
+    assert.equal("newDailyAvailableHours" in normNullDate, false, "'undefined' string normalized to omission");
+    assert.notEqual(normNullDate.newExamDate, "", "Never converts to empty string");
+    assert.notEqual(normNullDate.newExamDate, "null", "Never converts to string 'null'");
+    assert.notEqual(normNullDate.newExamDate, "undefined", "Never converts to string 'undefined'");
+
+    // Clear rejection if unnormalized empty string is directly passed to validator
+    const valRawEmpty = validateToolArguments(adaptPlanSchema, { newExamDate: "" });
+    assert.equal(valRawEmpty.valid, false, "Direct empty string to validator must be rejected");
+    assert.ok(valRawEmpty.error.includes("YYYY-MM-DD"), "Validator must clearly reject empty string date");
+    console.log("✓ Empty date normalized to omission and rejected clearly before tool execution if unnormalized");
+
+    // Unit checks for date inference prevention
+    assert.equal(userExplicitlyKeptExamDateUnchanged("Keep my exam date unchanged and my daily availability at 3 hours."), true);
+    assert.equal(userExplicitlyKeptExamDateUnchanged("Without changing the exam date, rebalance my hours."), true);
+    assert.equal(userExplicitlyKeptExamDateUnchanged("Change exam date to 2026-12-25"), false);
+
+    assert.equal(isDateAssociatedWithSession("2026-10-11", "I missed my Mathematics study session on 2026-10-11."), true);
+    assert.equal(isDateAssociatedWithSession("2026-12-25", "Change exam date to 2026-12-25."), false);
+
+    const normSessionDateOmitted = normalizeToolArguments(
+        adaptPlanSchema,
+        { planId: "adaptive-demo", newExamDate: "2026-10-11", newDailyAvailableHours: "3", reason: "Missed Mathematics session" },
+        { message: "Adapt study plan adaptive-demo because I missed my Mathematics study session on 2026-10-11. Keep my exam date unchanged and my daily availability at 3 hours. Preserve all subject priorities." }
+    );
+    assert.equal("newExamDate" in normSessionDateOmitted, false, "newExamDate must be omitted when user keeps exam date unchanged");
+    assert.equal(normSessionDateOmitted.newDailyAvailableHours, 3, "newDailyAvailableHours must be preserved as 3");
+    assert.equal(normSessionDateOmitted.planId, "adaptive-demo", "planId must remain 'adaptive-demo'");
+    console.log("✓ Unit test: newExamDate omitted when user keeps exam date unchanged; hours and planId preserved");
+
+    // 10.5 Existing plan ID and daily availability preservation end-to-end
+    console.log("\n[Test 10.5] E2E: Existing plan ID and daily availability preservation with live MCP server");
+    const livePreservePlanId = `adapt_preserve_${Date.now()}`;
+    const initialExamDate = "2026-11-30";
+    const initialDailyHours = 3;
+
+    // Step A: Create plan with initial date and hours
+    const createLiveRes = await mcpManager.callTool("create_study_plan", {
+        planId: livePreservePlanId,
+        subjects: ["Mathematics", "Physics"],
+        examDate: initialExamDate,
+        dailyAvailableHours: initialDailyHours
+    });
+    assert.equal(createLiveRes.isError, false, "Plan creation must succeed");
+
+    // Step B: Record a missed Mathematics session
+    const recordLiveRes = await mcpManager.callTool("record_study_session", {
+        planId: livePreservePlanId,
+        subject: "Mathematics",
+        hoursSpent: 0,
+        status: "missed"
+    });
+    assert.equal(recordLiveRes.isError, false, "Recording missed session must succeed");
+
+    // Step C: Run AdaptiveAgent adapting the plan where the model emits empty optional fields
+    // and copies the old description example with physics
+    const adaptBuggyProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "adapt_study_plan",
+                            arguments: {
+                                planId: "adapt_study_plan", // Buggy model output: tool name
+                                reason: "Recovering missed physics study session", // Buggy model output: wrong subject from description
+                                newExamDate: "", // Buggy model output: empty string
+                                newDailyAvailableHours: "" // Buggy model output: empty string
+                            }
+                        }
+                    ],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: `Study plan ${livePreservePlanId} successfully adapted with schedule rebalanced.`
+            };
+        }
+    };
+
+    const adaptLiveAgent = new AdaptiveAgent({
+        provider: adaptBuggyProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const adaptLiveResult = await adaptLiveAgent.run({
+        message: `Adapt study plan for planId "${livePreservePlanId}": missed Mathematics session. Keep exam date unchanged.`
+    });
+
+    assert.equal(adaptLiveResult.success, true, "Agent adaptation run must succeed");
+
+    // Step D: Retrieve adapted plan via MCP and verify preservation
+    const getAdaptedRes = await mcpManager.callTool("get_study_plan", { planId: livePreservePlanId });
+    assert.equal(getAdaptedRes.isError, false, "Retrieving adapted plan must succeed");
+    const adaptedPlanData = JSON.parse(getAdaptedRes.content);
+
+    assert.equal(adaptedPlanData.planId, livePreservePlanId, "planId must remain unchanged");
+    assert.equal(adaptedPlanData.examDate, initialExamDate, "examDate must remain unchanged");
+    assert.equal(adaptedPlanData.dailyStudyHours, initialDailyHours, "dailyStudyHours must remain unchanged");
+    assert.ok(adaptedPlanData.recentAdaptations.length > 0, "Adaptation must be recorded in history");
+    assert.ok(
+        adaptedPlanData.recentAdaptations[0].reason.includes("Mathematics"),
+        `Reason must reflect Mathematics, not physics. Received: "${adaptedPlanData.recentAdaptations[0].reason}"`
+    );
+    console.log("✓ Live MCP plan verified: examDate and dailyStudyHours preserved, reason faithfully updated to Mathematics!");
+
+    // 10.6 Exact live reproduction: user mentions session date (2026-10-11) and requests keeping exam date unchanged
+    console.log("\n[Test 10.6] Exact live reproduction: session date 2026-10-11 with exam date unchanged instruction");
+    const demoPlanId = "adaptive-demo";
+    const demoExamDate = "2026-11-30";
+    const demoDailyHours = 3;
+
+    // Step A: Setup the initial study plan adaptive-demo with all 3 subjects
+    const createDemoRes = await mcpManager.callTool("create_study_plan", {
+        planId: demoPlanId,
+        subjects: ["Mathematics", "Physics", "Chemistry"],
+        examDate: demoExamDate,
+        dailyAvailableHours: demoDailyHours,
+        priorities: { Mathematics: "high", Physics: "medium", Chemistry: "low" }
+    });
+    assert.equal(createDemoRes.isError, false, "Initial plan creation for adaptive-demo must succeed");
+
+    // Step B: Model reproduces the exact buggy tool call with session date 2026-10-11 as newExamDate
+    const liveBuggyReproProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [
+                        {
+                            name: "adapt_study_plan",
+                            arguments: {
+                                planId: "adaptive-demo",
+                                newExamDate: "2026-10-11", // Bug: falsely inferred from missed session date
+                                newDailyAvailableHours: "3",
+                                reason: "Missed Mathematics study session"
+                            }
+                        }
+                    ],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: `Study plan ${demoPlanId} successfully adapted with schedule rebalanced.`
+            };
+        }
+    };
+
+    const liveReproAgent = new AdaptiveAgent({
+        provider: liveBuggyReproProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const liveUserPrompt = "Adapt study plan adaptive-demo because I missed my Mathematics study session on 2026-10-11. Keep my exam date unchanged and my daily availability at 3 hours. Preserve all subject priorities.";
+    const reproResult = await liveReproAgent.run({
+        message: liveUserPrompt
+    });
+
+    // Requirement 8: This assertion MUST FAIL before the fix and PASS after the fix!
+    assert.equal(reproResult.success, true, `Agent adaptation run must succeed. Reply: ${reproResult.reply}`);
+
+    // Step C: Verify the saved plan via MCP get_study_plan
+    const getDemoRes = await mcpManager.callTool("get_study_plan", { planId: demoPlanId });
+    assert.equal(getDemoRes.isError, false, "Retrieving adaptive-demo must succeed");
+    const demoPlanData = JSON.parse(getDemoRes.content);
+
+    assert.equal(demoPlanData.planId, "adaptive-demo", "planId must remain 'adaptive-demo'");
+    assert.equal(demoPlanData.examDate, "2026-11-30", "examDate must remain 2026-11-30");
+    assert.equal(demoPlanData.dailyStudyHours, 3, "dailyStudyHours must remain 3");
+    assert.ok(demoPlanData.subjects.Chemistry, "Chemistry must remain present in adaptive-demo");
+    assert.equal(demoPlanData.subjects.Chemistry.priority, "low", "Chemistry priority must remain low");
+    assert.ok(demoPlanData.recentAdaptations.length > 0, "Adaptation must be recorded in history");
+    assert.ok(
+        demoPlanData.recentAdaptations[0].reason.toLowerCase().includes("mathematics"),
+        `Reason must reflect Mathematics. Received: "${demoPlanData.recentAdaptations[0].reason}"`
+    );
+    console.log("✓ Live pipeline reproduction verified: newExamDate omitted, examDate remains 2026-11-30, hours=3, reason preserved!");
+
+    // -------------------------------------------------------------
+    // Test 11: Intent-Based Tool Selection, Grounding & Plan Fidelity Suite
+    // -------------------------------------------------------------
+    console.log("\n--- Test 11: Intent-Based Tool Selection, Grounding & Plan Fidelity Suite ---");
+
+    // 11.1: Intent detection helpers
+    const liveRetrievalPrompt = "Retrieve study plan adaptive-demo. Report every subject, its priority, allocated hours, completed hours, remaining hours, recorded study sessions, missed hours, exam date, daily availability, and overall progress.";
+    const liveAdaptPrompt = "Adapt study plan adaptive-demo because I need to rebalance my schedule.";
+
+    assert.equal(isRetrievalIntent(liveRetrievalPrompt), true, "isRetrievalIntent must detect retrieval prompt");
+    assert.equal(isAdaptationIntent(liveRetrievalPrompt), false, "retrieval prompt must NOT be considered adaptation intent");
+    assert.equal(isRetrievalIntent(liveAdaptPrompt), false, "adaptation prompt must NOT be considered retrieval intent");
+    assert.equal(isAdaptationIntent(liveAdaptPrompt), true, "isAdaptationIntent must detect adaptation prompt");
+
+    // 11.2: Explicit plan ID preservation for retrieval requests
+    const extractedRetrievalId = extractExplicitPlanId(liveRetrievalPrompt);
+    assert.equal(extractedRetrievalId, "adaptive-demo", "Explicit planId 'adaptive-demo' must be extracted from retrieval prompt");
+
+    // 11.3: Tool validation rejects adapt_study_plan when invoked with retrieval reason or retrieval intent
+    const adaptToolDef = {
+        name: "adapt_study_plan",
+        inputSchema: {
+            type: "object",
+            properties: {
+                planId: { type: "string" },
+                reason: { type: "string" },
+                newExamDate: { type: "string" },
+                newDailyAvailableHours: { type: "number" }
+            }
+        }
+    };
+    const invalidAdaptVal = validateToolArguments(adaptToolDef, {
+        planId: "adaptive-demo",
+        reason: liveRetrievalPrompt
+    }, { userMessage: liveRetrievalPrompt });
+    assert.equal(invalidAdaptVal.valid, false, "Validation must reject adapt_study_plan with retrieval prompt");
+    assert.ok(invalidAdaptVal.error.includes("get_study_plan"), "Error must advise using get_study_plan instead");
+
+    // 11.4: False success prevention: wrong tool or failed retrieval cannot report success
+    const fakeWrongToolProvider = {
+        async chat() {
+            return {
+                toolCalls: [],
+                content: "Study plan adaptive-demo retrieved successfully! Everything looks great."
+            };
+        }
+    };
+    const wrongToolAgent = new AdaptiveAgent({
+        provider: fakeWrongToolProvider,
+        mcpClient: mcpManager,
+        maxRounds: 2
+    });
+    const wrongToolRes = await wrongToolAgent.run({ message: liveRetrievalPrompt });
+    assert.equal(wrongToolRes.success, false, "Retrieval without executing get_study_plan MUST fail");
+    assert.ok(wrongToolRes.reply.includes("Action Failed"), "Reply must state action failed");
+
+    // 11.5: End-to-end intent redirection: retrieval request invoking adapt_study_plan gets redirected to get_study_plan
+    // Setup adaptive-demo with 3 subjects and recorded study sessions
+    await mcpManager.callTool("create_study_plan", {
+        planId: "adaptive-demo",
+        subjects: ["Mathematics", "Physics", "Chemistry"],
+        examDate: "2026-11-30",
+        dailyAvailableHours: 3,
+        priorities: { Mathematics: "high", Physics: "medium", Chemistry: "low" }
+    });
+    await mcpManager.callTool("record_study_session", {
+        planId: "adaptive-demo",
+        subject: "Mathematics",
+        hoursSpent: 1.5,
+        status: "completed",
+        notes: "Calculus practice"
+    });
+    await mcpManager.callTool("record_study_session", {
+        planId: "adaptive-demo",
+        subject: "Chemistry",
+        hoursSpent: 0,
+        status: "missed",
+        notes: "Lab session cancelled"
+    });
+
+    const liveRetrievalBugReproProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                // Simulates the observed live bug: LLM incorrectly chooses adapt_study_plan with retrieval prompt as reason
+                return {
+                    toolCalls: [
+                        {
+                            name: "adapt_study_plan",
+                            arguments: {
+                                planId: "adaptive-demo",
+                                reason: liveRetrievalPrompt
+                            }
+                        }
+                    ],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: "Here is your retrieved study plan report."
+            };
+        }
+    };
+
+    const retrievalAgent = new AdaptiveAgent({
+        provider: liveRetrievalBugReproProvider,
+        mcpClient: mcpManager,
+        maxRounds: 3
+    });
+
+    const retrievalResult = await retrievalAgent.run({ message: liveRetrievalPrompt });
+    assert.equal(retrievalResult.success, true, `Retrieval agent run must succeed: ${retrievalResult.reply}`);
+    // Verify tool execution step redirected to get_study_plan
+    const toolExecStep = retrievalResult.steps.find(s => s.type === "tool_executing");
+    assert.ok(toolExecStep, "Must have executed a tool");
+    assert.equal(toolExecStep.tool, "get_study_plan", "Must execute get_study_plan, NEVER adapt_study_plan");
+    assert.equal(toolExecStep.arguments.planId, "adaptive-demo", "Must preserve planId 'adaptive-demo'");
+
+    // 11.6: Retrieval response grounding verification
+    const replyText = retrievalResult.reply;
+    assert.ok(replyText.includes("adaptive-demo"), "Reply must include planId");
+    assert.ok(replyText.includes("2026-11-30"), "Reply must include exam date 2026-11-30");
+    assert.ok(/Mathematics/i.test(replyText), "Reply must include Mathematics");
+    assert.ok(/Physics/i.test(replyText), "Reply must include Physics");
+    assert.ok(/Chemistry/i.test(replyText), "Reply must include Chemistry");
+    assert.ok(/HIGH/i.test(replyText) || /high/i.test(replyText), "Reply must report high priority");
+    assert.ok(/MEDIUM/i.test(replyText) || /medium/i.test(replyText), "Reply must report medium priority");
+    assert.ok(/LOW/i.test(replyText) || /low/i.test(replyText), "Reply must report low priority");
+    assert.ok(/3\s*(?:hours?|hrs?)/i.test(replyText), "Reply must report daily availability of 3 hours");
+    assert.ok(/session/i.test(replyText), "Reply must report recorded sessions");
+
+    // 11.7: Adapting a three-subject plan preserves Chemistry, all priorities, exam date, and sessions
+    const adaptPlanRes = await mcpManager.callTool("adapt_study_plan", {
+        planId: "adaptive-demo",
+        reason: "Rebalance schedule after missed Chemistry session"
+    });
+    assert.equal(adaptPlanRes.isError, false, "Live adaptation of adaptive-demo must succeed");
+    const adaptData = JSON.parse(adaptPlanRes.content);
+    assert.equal(adaptData.examDate, "2026-11-30", "Exam date must be returned and remain 2026-11-30");
+    assert.equal(adaptData.dailyStudyHours, 3, "Daily study hours must remain 3");
+    assert.ok(adaptData.adjustedSubjectAllocations.Chemistry, "Chemistry must be in adjusted allocations");
+    assert.equal(adaptData.adjustedSubjectAllocations.Chemistry.priority, "low", "Chemistry priority must be 'low'");
+    assert.equal(adaptData.adjustedSubjectAllocations.Mathematics.priority, "high", "Mathematics priority must be 'high'");
+    assert.equal(adaptData.adjustedSubjectAllocations.Physics.priority, "medium", "Physics priority must be 'medium'");
+
+    // Verify live MCP get_study_plan after adaptation
+    const verifyPlanRes = await mcpManager.callTool("get_study_plan", { planId: "adaptive-demo" });
+    assert.equal(verifyPlanRes.isError, false, "Retrieving adaptive-demo after adaptation must succeed");
+    const verifiedPlan = JSON.parse(verifyPlanRes.content);
+    assert.equal(verifiedPlan.planId, "adaptive-demo");
+    assert.equal(verifiedPlan.examDate, "2026-11-30", "Persisted examDate must remain 2026-11-30");
+    assert.equal(verifiedPlan.dailyStudyHours, 3, "Persisted dailyStudyHours must remain 3");
+    assert.ok(verifiedPlan.subjects.Chemistry, "Persisted subjects must include Chemistry");
+    assert.equal(verifiedPlan.subjects.Chemistry.priority, "low", "Persisted Chemistry priority must remain low");
+    assert.equal(verifiedPlan.subjects.Mathematics.priority, "high", "Persisted Mathematics priority must remain high");
+    assert.equal(verifiedPlan.subjects.Physics.priority, "medium", "Persisted Physics priority must remain medium");
+    assert.equal(verifiedPlan.totalSessionsRecorded, 2, "Recorded session history must be preserved (2 sessions)");
+    assert.ok(verifiedPlan.totalMissedHours > 0 || verifiedPlan.recentSessions.some(s => s.status === "missed"), "Missed session history must be preserved");
+
+    console.log("✓ Test 11 PASSED: Intent-based tool selection, planId preservation, grounding, and plan fidelity verified!");
+
+    await mcpManager.disconnect();
+
+    console.log("\n===============================================================================");
+    console.log("ALL NORMALIZATION, VALIDATION, MCP & E2E AGENT TESTS PASSED! (100%)");
+    console.log("===============================================================================");
+}
+
+runNormalizationSuite().catch(err => {
+    console.error("Test execution failed:", err);
+    process.exit(1);
+});
