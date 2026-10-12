@@ -185,12 +185,15 @@ export class AdaptiveAgent {
                                 timestamp: new Date().toISOString()
                             });
                         }
-                    } else if (isRetrievalIntent(message)) {
+                    } else if (isSessionRecordingIntent(message) && isRetrievalIntent(message)) {
                         completed = false;
-                        finalReply = `Action Failed: The requested study plan could not be retrieved because no study plan retrieval was performed.`;
+                        finalReply = `Action Failed: The requested study session recording and plan retrieval could not be completed because no tools were executed.`;
                     } else if (isSessionRecordingIntent(message)) {
                         completed = false;
                         finalReply = `Action Failed: The requested study session could not be recorded because no study session recording was performed.`;
+                    } else if (isRetrievalIntent(message)) {
+                        completed = false;
+                        finalReply = `Action Failed: The requested study plan could not be retrieved because no study plan retrieval was performed.`;
                     } else if (isAdaptationIntent(message)) {
                         completed = false;
                         finalReply = `Action Failed: The requested plan adaptation could not be completed because no study plan adaptation was performed.`;

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, shouldOmitSessionDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent } from "../src/agent/normalizer.js";
+import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, shouldOmitSessionDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, hasExplicitPlanRetrievalRequest } from "../src/agent/normalizer.js";
 import { validateToolArguments, verifyToolResult } from "../src/agent/validator.js";
 import {
     detectDailyScheduleOverrun,
@@ -2678,6 +2678,212 @@ The most recent sessions were all completed on October 12, 2026.
     assert.ok(checkPhantomAdapt.correctedReply.includes("Action Failed"), "Corrected reply must state Action Failed");
 
     console.log("✓ Section 20 verified: Phase 2 backend testing hardening, ambiguity resolution, numerical validation & phantom execution suppression complete");
+
+    // -------------------------------------------------------------
+    // Section 21: Session-Recording Grounding & Disambiguation Regression Suite
+    // -------------------------------------------------------------
+    console.log("\n--- Section 21: Session-Recording Grounding & Disambiguation Regression Suite ---");
+
+    const reproSessionPrompt = "Record a completed 1-hour Mathematics study session for my adaptive-demo study plan. Confirm that the session was saved and update my progress.";
+    const combinedSessionRetrievalPrompt = "Record a completed 1-hour Mathematics study session for my adaptive-demo study plan and retrieve the study plan.";
+    const pureRetrievalPrompt = "Retrieve study plan adaptive-demo and show all subjects and progress.";
+
+    // 21.1 Intent classification disambiguation
+    assert.equal(isSessionRecordingIntent(reproSessionPrompt), true, "Prompt must be classified as session recording intent");
+    assert.equal(isRetrievalIntent(reproSessionPrompt), false, "Session recording prompt mentioning progress must NOT be classified as retrieval intent");
+    assert.equal(hasExplicitPlanRetrievalRequest(reproSessionPrompt), false, "Repro prompt does not request separate plan retrieval");
+
+    // Exact audit intent verification cases
+    const auditRecordOnly = "Record a completed 1-hour Mathematics study session and confirm it was saved.";
+    assert.equal(isSessionRecordingIntent(auditRecordOnly), true, "Record-only prompt must be session recording intent");
+    assert.equal(isRetrievalIntent(auditRecordOnly), false, "Record-only prompt must NOT be retrieval intent");
+
+    const auditRetrievalOnly = "Show my study plan.";
+    assert.equal(isSessionRecordingIntent(auditRetrievalOnly), false, "Show study plan must NOT be session recording intent");
+    assert.equal(isRetrievalIntent(auditRetrievalOnly), true, "Show study plan must be retrieval intent");
+
+    const auditCombined = "Record a study session and then show my updated study plan.";
+    assert.equal(isSessionRecordingIntent(auditCombined), true, "Combined prompt must be session recording intent");
+    assert.equal(isRetrievalIntent(auditCombined), true, "Combined prompt must be retrieval intent");
+
+    const auditProgressOnly = "Update my progress.";
+    assert.equal(isRetrievalIntent(auditProgressOnly), false, "Update my progress must NOT be classified as retrieval intent solely due to 'progress'");
+    assert.equal(isSessionRecordingIntent(auditProgressOnly), false, "Update my progress without session details must NOT be session recording intent");
+
+    assert.equal(isSessionRecordingIntent(combinedSessionRetrievalPrompt), true, "Combined prompt must be classified as session recording intent");
+    assert.equal(isRetrievalIntent(combinedSessionRetrievalPrompt), true, "Combined prompt must be classified as retrieval intent");
+    assert.equal(hasExplicitPlanRetrievalRequest(combinedSessionRetrievalPrompt), true, "Combined prompt explicitly requests plan retrieval");
+
+    assert.equal(isSessionRecordingIntent(pureRetrievalPrompt), false, "Pure retrieval prompt must NOT be classified as session recording intent");
+    assert.equal(isRetrievalIntent(pureRetrievalPrompt), true, "Pure retrieval prompt must be classified as retrieval intent");
+
+    // Mock successful record_study_session tool execution result
+    const executedRecordSessionTools = [
+        {
+            toolName: "record_study_session",
+            toolArgs: { planId: "adaptive-demo", subject: "Mathematics", hoursSpent: 1, status: "completed" },
+            isError: false,
+            parsedData: {
+                message: 'Study session for "Mathematics" recorded successfully (completed).',
+                session: { subject: "Mathematics", hoursSpent: 1, status: "completed", date: "2026-10-12" },
+                subjectProgress: {
+                    subject: "Mathematics",
+                    completedHours: 1,
+                    missedHours: 0,
+                    remainingHours: 49,
+                    progressPercentage: "2%"
+                },
+                overallPlanProgress: "1%"
+            }
+        }
+    ];
+
+    // Mock successful get_study_plan tool execution result
+    const section21RetrievalTools = [
+        {
+            toolName: "get_study_plan",
+            toolArgs: { planId: "adaptive-demo" },
+            isError: false,
+            parsedData: {
+                planId: "adaptive-demo",
+                examDate: "2026-11-30",
+                dailyStudyHours: 3,
+                daysRemaining: 49,
+                totalAvailableHours: 147,
+                totalRemainingHours: 146,
+                totalCompletedHours: 1,
+                totalMissedHours: 0,
+                subjects: {
+                    Mathematics: { priority: "high", allocatedHours: 60, remainingHours: 59, completedHours: 1, progressPercentage: 2 },
+                    Physics: { priority: "medium", allocatedHours: 50, remainingHours: 50, completedHours: 0, progressPercentage: 0 },
+                    Chemistry: { priority: "low", allocatedHours: 37, remainingHours: 37, completedHours: 0, progressPercentage: 0 }
+                },
+                sessions: [{ subject: "Mathematics", hoursSpent: 1, date: "2026-10-12" }]
+            }
+        }
+    ];
+
+    const groundedSessionReply = "Your 1-hour study session for Mathematics has been recorded successfully. The session was saved for adaptive-demo, Mathematics now has 1 completed hour with 49 remaining hours (2% progress), and overall plan progress is 1%.";
+
+    // 21.2 Successful session recording with a grounded final answer and no unnecessary get_study_plan call
+    const sessionCheckSuccess = verifyFinalAnswerConsistency(groundedSessionReply, executedRecordSessionTools, reproSessionPrompt);
+    assert.equal(sessionCheckSuccess.valid, true, "Grounded session confirmation must be accepted without requiring get_study_plan");
+
+    // 21.3 Failed session recording must not be reported as successful
+    // 21.3a Failed tool execution (isError: true)
+    const failedRecordTools = [
+        {
+            toolName: "record_study_session",
+            toolArgs: { planId: "adaptive-demo", subject: "Mathematics", hoursSpent: 1, status: "completed" },
+            isError: true,
+            error: "Cannot record session: No study plan found with ID \"adaptive-demo\"."
+        }
+    ];
+    const sessionCheckFailedTool = verifyFinalAnswerConsistency(groundedSessionReply, failedRecordTools, reproSessionPrompt);
+    assert.equal(sessionCheckFailedTool.valid, false, "Failed record_study_session tool call must fail verification");
+    assert.equal(sessionCheckFailedTool.failure, true, "Must be flagged as failure");
+    assert.ok(sessionCheckFailedTool.correctedReply.includes("Action Failed"), "Corrected reply must state Action Failed");
+
+    // 21.3b Phantom session recording (zero tools executed)
+    const sessionCheckPhantom = verifyFinalAnswerConsistency(groundedSessionReply, [], reproSessionPrompt);
+    assert.equal(sessionCheckPhantom.valid, false, "Phantom session reply without executed tools must fail");
+    assert.equal(sessionCheckPhantom.failure, true, "Must be flagged as failure");
+    assert.ok(sessionCheckPhantom.correctedReply.includes("Action Failed: The requested study session could not be recorded"), "Must cite session recording failure");
+
+    // 21.4 Explicit requests to retrieve the study plan still require successful get_study_plan execution
+    // 21.4a Retrieval request with zero tools executed
+    const retrievalCheckPhantom = verifyFinalAnswerConsistency("Here is your study plan.", [], pureRetrievalPrompt);
+    assert.equal(retrievalCheckPhantom.valid, false, "Retrieval request without tools must fail");
+    assert.equal(retrievalCheckPhantom.failure, true, "Must be flagged as failure");
+    assert.ok(retrievalCheckPhantom.correctedReply.includes("get_study_plan"), "Must require get_study_plan");
+
+    // 21.4b Retrieval request with only record_study_session executed
+    const retrievalCheckWrongTool = verifyFinalAnswerConsistency("Here is your study plan.", executedRecordSessionTools, pureRetrievalPrompt);
+    assert.equal(retrievalCheckWrongTool.valid, false, "Retrieval request with only record_study_session must fail");
+    assert.equal(retrievalCheckWrongTool.failure, true, "Must be flagged as failure");
+    assert.ok(retrievalCheckWrongTool.correctedReply.includes("get_study_plan"), "Must cite missing get_study_plan");
+
+    // 21.4c Retrieval request with successful get_study_plan execution
+    const groundedRetrievalReply = "Study plan adaptive-demo retrieved successfully. Subjects: Mathematics (high priority, 1h completed, 59h remaining), Physics (medium priority, 0h completed, 50h remaining), Chemistry (low priority, 0h completed, 37h remaining). Overall progress is on track with exam date 2026-11-30.";
+    const retrievalCheckSuccess = verifyFinalAnswerConsistency(groundedRetrievalReply, section21RetrievalTools, pureRetrievalPrompt);
+    assert.equal(retrievalCheckSuccess.valid, true, "Retrieval request with successful get_study_plan must pass verification");
+
+    // 21.5 Combined recording-plus-retrieval requests require both actions
+    const combinedGroundedReply = "Study session of 1 hour for Mathematics recorded successfully. The updated study plan adaptive-demo has been retrieved: Mathematics has 1h completed, Physics has 50h remaining, Chemistry has 37h remaining, with exam date 2026-11-30 and overall progress of 1%.";
+
+    // 21.5a Combined request missing get_study_plan
+    const combinedMissingRetrieval = verifyFinalAnswerConsistency(combinedGroundedReply, executedRecordSessionTools, combinedSessionRetrievalPrompt);
+    assert.equal(combinedMissingRetrieval.valid, false, "Combined request missing get_study_plan must fail");
+    assert.equal(combinedMissingRetrieval.failure, true, "Must be flagged as failure");
+    assert.ok(combinedMissingRetrieval.correctedReply.includes("get_study_plan"), "Must cite get_study_plan was not executed");
+
+    // 21.5b Combined request missing record_study_session
+    const combinedMissingRecording = verifyFinalAnswerConsistency(combinedGroundedReply, section21RetrievalTools, combinedSessionRetrievalPrompt);
+    assert.equal(combinedMissingRecording.valid, false, "Combined request missing record_study_session must fail");
+    assert.equal(combinedMissingRecording.failure, true, "Must be flagged as failure");
+    assert.ok(combinedMissingRecording.correctedReply.includes("record_study_session"), "Must cite record_study_session was not executed");
+
+    // 21.5c Combined request with BOTH tools executed successfully
+    const executedCombinedTools = [...executedRecordSessionTools, ...section21RetrievalTools];
+    const combinedCheckSuccess = verifyFinalAnswerConsistency(combinedGroundedReply, executedCombinedTools, combinedSessionRetrievalPrompt);
+    assert.equal(combinedCheckSuccess.valid, true, "Combined request with both tools successfully executed must pass verification");
+
+    // 21.6 Existing exam-date omission and contradiction behavior remains unchanged
+    // 21.6a Explicit exam date request requires exam date
+    assert.equal(isExamDateRequested("When's my exam?"), true, "Contraction when's my exam must be true");
+    // 21.6b Non-exam-date request accepts omission
+    assert.equal(isExamDateRequested("How is my preparation for the exam?"), false, "Progress inquiry must not be exam date request");
+    // 21.6c Contradiction detection
+    assert.equal(isExamDateContradicted("Your exam date is 2026-12-15.", "2026-11-30"), true, "Mismatched date must be contradicted");
+    assert.equal(isExamDateContradicted("You are making steady progress with 28 completed hours.", "2026-11-30"), false, "Omission of unrequested date must NOT be contradicted");
+
+    // 21.7 Targeted regression pass for user prompts:
+    // P1: "Record a session, then get my progress." -> Recording only
+    const prompt1 = "Record a session, then get my progress.";
+    assert.equal(isSessionRecordingIntent(prompt1), true, "P1 must be session recording intent");
+    assert.equal(isRetrievalIntent(prompt1), false, "P1 must NOT be retrieval intent");
+    const p1CheckSuccess = verifyFinalAnswerConsistency(groundedSessionReply, executedRecordSessionTools, prompt1);
+    assert.equal(p1CheckSuccess.valid, true, "P1 must pass with only record_study_session");
+    const p1CheckPhantom = verifyFinalAnswerConsistency(groundedSessionReply, [], prompt1);
+    assert.equal(p1CheckPhantom.valid, false, "P1 must fail without tools");
+
+    // P2: "Record a session and show the updated progress." -> Recording only
+    const prompt2 = "Record a session and show the updated progress.";
+    assert.equal(isSessionRecordingIntent(prompt2), true, "P2 must be session recording intent");
+    assert.equal(isRetrievalIntent(prompt2), false, "P2 must NOT be retrieval intent");
+    const p2CheckSuccess = verifyFinalAnswerConsistency(groundedSessionReply, executedRecordSessionTools, prompt2);
+    assert.equal(p2CheckSuccess.valid, true, "P2 must pass with only record_study_session");
+
+    // P3: "Record a session and show my updated study plan." -> Both recording and retrieval
+    const prompt3 = "Record a session and show my updated study plan.";
+    assert.equal(isSessionRecordingIntent(prompt3), true, "P3 must be session recording intent");
+    assert.equal(isRetrievalIntent(prompt3), true, "P3 must be retrieval intent");
+    assert.equal(hasExplicitPlanRetrievalRequest(prompt3), true, "P3 explicitly requests plan retrieval");
+    const p3CheckSuccess = verifyFinalAnswerConsistency(combinedGroundedReply, executedCombinedTools, prompt3);
+    assert.equal(p3CheckSuccess.valid, true, "P3 must pass with both tools executed");
+    const p3CheckMissingRet = verifyFinalAnswerConsistency(combinedGroundedReply, executedRecordSessionTools, prompt3);
+    assert.equal(p3CheckMissingRet.valid, false, "P3 must fail if get_study_plan is missing");
+    const p3CheckMissingRec = verifyFinalAnswerConsistency(combinedGroundedReply, section21RetrievalTools, prompt3);
+    assert.equal(p3CheckMissingRec.valid, false, "P3 must fail if record_study_session is missing");
+
+    // P4: "Show my recorded sessions." -> Session history retrieval, NOT a new recording action
+    const prompt4 = "Show my recorded sessions.";
+    assert.equal(isSessionRecordingIntent(prompt4), false, "P4 must NOT be session recording intent");
+    assert.equal(isRetrievalIntent(prompt4), true, "P4 must be retrieval intent");
+    const p4CheckSuccess = verifyFinalAnswerConsistency("Study plan adaptive-demo retrieved. 1 recorded study session.", section21RetrievalTools, prompt4);
+    assert.equal(p4CheckSuccess.valid, true, "P4 must pass with get_study_plan");
+    const p4CheckWrongTool = verifyFinalAnswerConsistency("Study plan adaptive-demo retrieved. 1 recorded study session.", executedRecordSessionTools, prompt4);
+    assert.equal(p4CheckWrongTool.valid, false, "P4 must fail if only record_study_session was executed");
+
+    // P5: "Retrieve my study plan and report my progress." -> Retrieval only
+    const prompt5 = "Retrieve my study plan and report my progress.";
+    assert.equal(isSessionRecordingIntent(prompt5), false, "P5 must NOT be session recording intent");
+    assert.equal(isRetrievalIntent(prompt5), true, "P5 must be retrieval intent");
+    assert.equal(hasExplicitPlanRetrievalRequest(prompt5), true, "P5 explicitly requests plan retrieval");
+    const p5CheckSuccess = verifyFinalAnswerConsistency(groundedRetrievalReply, section21RetrievalTools, prompt5);
+    assert.equal(p5CheckSuccess.valid, true, "P5 must pass with get_study_plan");
+
+    console.log("✓ Section 21 verified: Session-recording grounding, disambiguation & combined intent regression tests passed");
 
     console.log("\n===============================================================================");
     console.log("ALL NORMALIZATION, VALIDATION, MCP & E2E AGENT TESTS PASSED! (100%)");

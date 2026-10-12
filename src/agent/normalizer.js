@@ -372,6 +372,20 @@ export function isUnspecifiedOptionalValue(value) {
 }
 
 /**
+ * Detects if a text explicitly requests retrieval or inspection of a study plan
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function hasExplicitPlanRetrievalRequest(text) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    return /\b(?:retrieve|get|fetch|inspect)\b.*?\b(?:study\s+plan|plan)\b/i.test(text) ||
+           /\b(?:show|display|view)\s+(?:the\s+|my\s+)?(?:full\s+|entire\s+|whole\s+|complete\s+|updated\s+|current\s+|revised\s+|latest\s+)?(?:study\s+plan|plan)\b/i.test(text) ||
+           /\b(?:full|entire|complete|whole)\s+study\s+plan\b/i.test(text) ||
+           /\b(?:report\s+on|report\s+every)\s+(?:subject|study\s+plan)\b/i.test(text) ||
+           /\b(?:subject(?:-wise|-by-subject|\s+wise|\s+by\s+subject)?\s+breakdown|breakdown\s+of\s+all\s+subjects)\b/i.test(text);
+}
+
+/**
  * Detects if a text represents a study plan retrieval or inspection intent
  * @param {string} text
  * @returns {boolean}
@@ -379,16 +393,24 @@ export function isUnspecifiedOptionalValue(value) {
 export function isRetrievalIntent(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     const clean = text.trim();
-    // Common retrieval patterns:
-    // e.g. "Retrieve study plan adaptive-demo...", "Show study plan...", "Report every subject...", "Get study plan..."
+
+    // Exclude explicit requests to adapt or modify schedule
+    const isExplicitAdapt = /\b(?:adapt|re-?balance|modify\s+schedule|adjust\s+schedule|recalculate)\b/i.test(clean);
+    if (isExplicitAdapt) return false;
+
+    // For session recording requests, treat as retrieval intent only if the user
+    // ALSO explicitly requested a separate study plan retrieval
+    if (isSessionRecordingIntent(clean)) {
+        return hasExplicitPlanRetrievalRequest(clean);
+    }
+
     const retrievalPatterns = [
         /\b(?:retrieve|get|show|display|inspect|view|report\s+on|report\s+every|fetch)\b.*?\b(?:study\s+plan|plan|subject|metric|progress|session)\b/i,
         /\b(?:study\s+plan|plan)\b.*?\b(?:status|details|progress|overview|report|metrics)\b/i,
         /^(?:retrieve|get|show|display|inspect|view|report|fetch)\b/i
     ];
-    // Exclude explicit requests to adapt or modify schedule
-    const isExplicitAdapt = /\b(?:adapt|re-?balance|modify\s+schedule|adjust\s+schedule|recalculate)\b/i.test(clean);
-    return retrievalPatterns.some(p => p.test(clean)) && !isExplicitAdapt;
+
+    return retrievalPatterns.some(p => p.test(clean));
 }
 
 /**
@@ -410,8 +432,11 @@ export function isSessionRecordingIntent(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     const clean = text.trim();
 
-    // Pure retrieval queries such as "show recorded sessions" or "retrieve sessions" are retrieval intents
-    if (isRetrievalIntent(clean) && !/\b(?:record|log|track|mark|enter|add)\b/i.test(clean)) {
+    // Pure retrieval queries such as "show recorded sessions", "view sessions", or "list recorded sessions"
+    // are retrieval queries, not recording actions
+    const isPureSessionHistoryQuery = /^(?:show|retrieve|get|display|view|list|inspect|report)\b/i.test(clean) &&
+        !/\b(?:record|log|track|mark|enter|add)\b/i.test(clean);
+    if (isPureSessionHistoryQuery) {
         return false;
     }
 

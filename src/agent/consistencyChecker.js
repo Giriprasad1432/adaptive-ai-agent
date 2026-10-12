@@ -883,11 +883,11 @@ export function detectBlanketRecentSessionDateContradiction(reply, recentSession
 export function verifyFinalAnswerConsistency(finalReply, executedTools = [], userMessage = "") {
     finalReply = stripMetaPreamble(finalReply);
     if (!Array.isArray(executedTools) || executedTools.length === 0) {
-        if (userMessage && isRetrievalIntent(userMessage)) {
+        if (userMessage && isSessionRecordingIntent(userMessage) && isRetrievalIntent(userMessage)) {
             return {
                 valid: false,
-                reason: "Retrieval request requires successful execution of get_study_plan.",
-                correctedReply: 'Action Failed: The requested plan retrieval could not be completed successfully. Required tool "get_study_plan" was not executed.',
+                reason: 'Combined recording and retrieval request requires successful execution of both "record_study_session" and "get_study_plan".',
+                correctedReply: 'Action Failed: The requested study session recording and plan retrieval could not be completed because required tools were not executed.',
                 failure: true
             };
         }
@@ -896,6 +896,14 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 valid: false,
                 reason: 'Session recording request requires successful execution of "record_study_session".',
                 correctedReply: 'Action Failed: The requested study session could not be recorded because "record_study_session" was not executed.',
+                failure: true
+            };
+        }
+        if (userMessage && isRetrievalIntent(userMessage)) {
+            return {
+                valid: false,
+                reason: "Retrieval request requires successful execution of get_study_plan.",
+                correctedReply: 'Action Failed: The requested plan retrieval could not be completed successfully. Required tool "get_study_plan" was not executed.',
                 failure: true
             };
         }
@@ -911,6 +919,18 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
     }
 
     // 1. Intent execution integrity checks
+    if (userMessage && isSessionRecordingIntent(userMessage)) {
+        const sessionTool = executedTools.find(t => t.toolName === "record_study_session" && !t.isError && t.parsedData);
+        if (!sessionTool) {
+            return {
+                valid: false,
+                reason: 'Session recording request did not successfully execute "record_study_session".',
+                correctedReply: 'Action Failed: The requested study session could not be recorded because "record_study_session" was not executed.',
+                failure: true
+            };
+        }
+    }
+
     if (userMessage && isRetrievalIntent(userMessage)) {
         const retrievalTool = executedTools.find(t => t.toolName === "get_study_plan" && !t.isError && t.parsedData);
         if (!retrievalTool) {
