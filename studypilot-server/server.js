@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getPlan, savePlan } from "./storage.js";
+import { getPlan, savePlan, updatePlan } from "./storage.js";
 import { createPlan, recordSession, adaptPlan } from "./planner.js";
 
 // Initialize the StudyPilot MCP Server
@@ -183,8 +183,18 @@ mcp.tool(
     },
     async ({ subject, hoursSpent, status, scheduledHours, notes, date, planId = "default" }) => {
         try {
-            const plan = getPlan(planId);
-            if (!plan) {
+            const updated = updatePlan(planId, (plan) => {
+                return recordSession(plan, {
+                    subject,
+                    hoursSpent,
+                    scheduledHours,
+                    status,
+                    notes,
+                    date
+                });
+            });
+
+            if (!updated) {
                 return {
                     isError: true,
                     content: [
@@ -196,16 +206,7 @@ mcp.tool(
                 };
             }
 
-            const result = recordSession(plan, {
-                subject,
-                hoursSpent,
-                scheduledHours,
-                status,
-                notes,
-                date
-            });
-
-            savePlan(planId, plan);
+            const { plan, result } = updated;
 
             const outcome = {
                 message: `Study session for "${subject}" recorded successfully (${status}).`,
@@ -255,8 +256,15 @@ mcp.tool(
     },
     async ({ planId = "default", reason, newExamDate, newDailyAvailableHours }) => {
         try {
-            const plan = getPlan(planId);
-            if (!plan) {
+            const updated = updatePlan(planId, (plan) => {
+                return adaptPlan(plan, {
+                    reason: reason || "Progress adaptation and missed session recovery",
+                    newExamDate,
+                    newDailyAvailableHours
+                });
+            });
+
+            if (!updated) {
                 return {
                     isError: true,
                     content: [
@@ -268,13 +276,8 @@ mcp.tool(
                 };
             }
 
-            const { adaptation } = adaptPlan(plan, {
-                reason: reason || "Progress adaptation and missed session recovery",
-                newExamDate,
-                newDailyAvailableHours
-            });
-
-            savePlan(planId, plan);
+            const { plan, result } = updated;
+            const { adaptation } = result;
 
             const summary = {
                 message: "Study plan adapted successfully!",

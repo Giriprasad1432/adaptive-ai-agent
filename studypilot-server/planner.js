@@ -534,11 +534,13 @@ export function refreshPlanTotals(plan) {
     plan.totalRemainingHours = Math.round(remaining * 10) / 10;
     plan.totalAllocatedHours = Math.round(allocated * 10) / 10;
 
+
     if (plan.daysRemaining && plan.dailyAvailableHours) {
         const remainingCapacity = Math.round(plan.daysRemaining * plan.dailyAvailableHours * 10) / 10;
         plan.availableCapacityHours = remainingCapacity;
-        plan.totalAvailableHours = Math.round((plan.totalCompletedHours + remainingCapacity) * 10) / 10;
+        plan.totalAvailableHours = remainingCapacity;
     }
+
 
     plan.overallProgressPercentage = plan.totalAllocatedHours > 0
         ? Math.min(100, Math.round((plan.totalCompletedHours / plan.totalAllocatedHours) * 100))

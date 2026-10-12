@@ -2,7 +2,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import path from "node:path";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { DATA_FILE, LOCK_FILE, acquireLock, releaseLock, withFileLock, loadAllPlans, saveAllPlans, savePlan, getPlan, updatePlan } from "../studypilot-server/storage.js";
+import { recordSession } from "../studypilot-server/planner.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -85,7 +89,18 @@ async function runDeterministicTests() {
             arguments: { planId: testPlanId }
         });
 
-        assert.equal(Boolean(getResult1.isError), false, "get_study_plan returned an error");
+        if (getResult1.isError) {
+            console.error(
+                "get_study_plan error:",
+                getResult1.content?.map(item => item.text).join("\n") || getResult1.content
+            );
+        }
+
+        assert.equal(
+            Boolean(getResult1.isError),
+            false,
+            `get_study_plan returned an error: ${getResult1.content?.map(item => item.text).join("\n") || JSON.stringify(getResult1.content)}`
+        );
         const getData1 = JSON.parse(getResult1.content[0].text);
         assert.equal(getData1.planId, testPlanId);
         assert.equal(getData1.totalCompletedHours, 0);
@@ -104,7 +119,18 @@ async function runDeterministicTests() {
             }
         });
 
-        assert.equal(Boolean(compSessionResult.isError), false, "record_study_session (completed) failed");
+        if (compSessionResult.isError) {
+            console.error(
+                "record_study_session error:",
+                compSessionResult.content?.map(item => item.text).join("\n")
+            );
+        }
+
+        assert.equal(
+            Boolean(compSessionResult.isError),
+            false,
+            "record_study_session (completed) failed"
+        );
         const compSessionData = JSON.parse(compSessionResult.content[0].text);
         assert.equal(compSessionData.subjectProgress.completedHours, 2);
         console.log(`✓ Completed session recorded: Chemistry completedHours=${compSessionData.subjectProgress.completedHours}h`);
@@ -261,6 +287,11 @@ async function runDeterministicTests() {
         assert.equal(retrievedPlan.daysRemaining, 49);
         assert.equal(retrievedPlan.dailyStudyHours, 3);
         assert.equal(retrievedPlan.availableCapacityHours, 147);
+        assert.equal(
+            retrievedPlan.totalAvailableHours,
+            147,
+            "Total available hours must not increase when completed hours are recorded"
+        );
         assert.equal(retrievedPlan.totalRemainingHours, 147);
         assert.equal(retrievedPlan.totalCompletedHours, 1.5);
         assert.equal(retrievedPlan.totalMissedHours, 2);
@@ -289,12 +320,408 @@ async function runDeterministicTests() {
 
         console.log("✓ Test 7 PASSED: Study-plan accounting invariants, missed session tracking, and capacity-constrained adaptation verified!");
 
+        // Step 8: Regression Test for Lock-Release Bug & Lock Ownership Verification
+        console.log("\n--- Test 8: Lock-Release Bug Regression & Ownership Verification ---");
+
+        // Ensure data directory exists
+        fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+
+        // 8a. Simulate another process holding the lock file with a foreign token
+        const foreignToken = `foreign_process_${Date.now()}_test_token`;
+        fs.writeFileSync(LOCK_FILE, foreignToken, "utf-8");
+        assert.ok(fs.existsSync(LOCK_FILE), "Simulated foreign lock file must exist on disk");
+
+        // 8b. Verify releaseLock(null) does NOT remove foreign lock file
+        releaseLock(null);
+        assert.ok(fs.existsSync(LOCK_FILE), "releaseLock(null) must NOT unlink foreign lock file");
+        assert.equal(
+            fs.readFileSync(LOCK_FILE, "utf-8").trim(),
+            foreignToken,
+            "Foreign lock token must remain intact after releaseLock(null)"
+        );
+
+        // 8c. Verify releaseLock with mismatched token does NOT remove foreign lock file
+        releaseLock({ fd: 999999, token: "mismatched_token" });
+        assert.ok(fs.existsSync(LOCK_FILE), "releaseLock with mismatched token must NOT unlink foreign lock file");
+        assert.equal(
+            fs.readFileSync(LOCK_FILE, "utf-8").trim(),
+            foreignToken,
+            "Foreign lock token must remain intact after releaseLock with mismatched token"
+        );
+
+        // 8d. Verify withFileLock times out, throws clear error, and does NOT execute protected function
+        let fnExecuted = false;
+        let timeoutErrorCaught = false;
+        try {
+            // Short maxWaitMs (60ms) and retryIntervalMs (15ms)
+            withFileLock(() => {
+                fnExecuted = true;
+            }, 60, 15);
+        } catch (err) {
+            timeoutErrorCaught = true;
+            assert.ok(
+                err.message.includes("timed out"),
+                `Timeout error message expected. Received: "${err.message}"`
+            );
+        }
+
+        assert.equal(timeoutErrorCaught, true, "withFileLock must throw when acquireLock times out");
+        assert.equal(fnExecuted, false, "Protected function must NOT be executed when lock acquisition times out");
+
+        // 8e. Verify foreign lock remains completely intact after withFileLock timeout and finally block
+        assert.ok(fs.existsSync(LOCK_FILE), "Foreign lock file must remain intact after withFileLock timeout");
+        assert.equal(
+            fs.readFileSync(LOCK_FILE, "utf-8").trim(),
+            foreignToken,
+            "Foreign lock file contents must remain unmodified after withFileLock timeout"
+        );
+
+        // Clean up simulated foreign lock
+        try { fs.unlinkSync(LOCK_FILE); } catch {}
+
+        // 8f. Verify normal acquireLock, withFileLock, and releaseLock work cleanly
+        let normalFnExecuted = false;
+        const result = withFileLock(() => {
+            normalFnExecuted = true;
+            return "lock_success";
+        }, 500, 20);
+        assert.equal(normalFnExecuted, true, "Protected function must execute when lock acquired successfully");
+        assert.equal(result, "lock_success", "withFileLock must return the result of the protected function");
+        assert.ok(!fs.existsSync(LOCK_FILE), "Lock file must be cleanly released and removed on normal exit");
+
+        console.log("✓ Test 8 PASSED: Lock-release bug fixed; foreign lock preserved; timeout error thrown; protected function guarded.");
+
+        // Step 9: Regression Test: Prevent Destructive Writes after Read Failures
+        console.log("\n--- Test 9: Prevent Destructive Writes after Read Failures ---");
+
+        // 9a. Verify genuinely new installation returns {} when target file does not exist
+        const nonExistentFile = path.resolve(__dirname, `../studypilot-server/data/nonexistent_${Date.now()}.json`);
+        assert.ok(!fs.existsSync(nonExistentFile), "nonExistentFile must not exist initially");
+        const emptyPlans = loadAllPlans(1, 5, nonExistentFile);
+        assert.deepEqual(emptyPlans, {}, "loadAllPlans must return {} when target file does not exist");
+        console.log("✓ New installation behavior preserved: returns {} when file does not exist");
+
+        // 9b. Simulate malformed JSON in a data file and verify savePlan throws and does NOT overwrite
+        const testDataFile = path.resolve(__dirname, `../studypilot-server/data/test_malformed_${Date.now()}.json`);
+        const malformedContent = '{"corrupted": true, [malformed_syntax}';
+        try {
+            fs.writeFileSync(testDataFile, malformedContent, "utf-8");
+
+            // loadAllPlans must throw on malformed JSON
+            let loadThrew = false;
+            try {
+                loadAllPlans(2, 5, testDataFile);
+            } catch (err) {
+                loadThrew = true;
+                assert.ok(
+                    err.message.includes("Failed to read storage data file"),
+                    `Expected read error message. Received: "${err.message}"`
+                );
+            }
+            assert.equal(loadThrew, true, "loadAllPlans must throw on malformed JSON instead of silently returning {}");
+
+            // savePlan must throw and NOT overwrite the malformed data with an empty fallback
+            let saveThrew = false;
+            try {
+                savePlan("destructive_overwrite_candidate", {
+                    planId: "destructive_overwrite_candidate",
+                    subjects: { Math: {} }
+                }, testDataFile);
+            } catch (err) {
+                saveThrew = true;
+                assert.ok(
+                    err.message.includes("Failed to read storage data file"),
+                    `savePlan must propagate the read error. Received: "${err.message}"`
+                );
+            }
+            assert.equal(saveThrew, true, "savePlan must throw and abort when loadAllPlans fails");
+
+            // Verify existing file on disk was NOT overwritten by savePlan
+            const contentAfterFailedSave = fs.readFileSync(testDataFile, "utf-8");
+            assert.equal(
+                contentAfterFailedSave,
+                malformedContent,
+                "Target file must remain identical to malformed content without being overwritten by savePlan"
+            );
+            console.log("✓ Malformed JSON read failure caught; destructive overwrite prevented");
+
+            // 9c. Simulate persistent read failure (e.g. EACCES permission / disk error)
+            const originalReadFileSync = fs.readFileSync;
+            try {
+                fs.readFileSync = (p, ...args) => {
+                    if (p === testDataFile) {
+                        const err = new Error("EACCES: permission denied, read");
+                        err.code = "EACCES";
+                        throw err;
+                    }
+                    return originalReadFileSync(p, ...args);
+                };
+
+                let readErrThrew = false;
+                try {
+                    savePlan("persistent_read_fail_candidate", { planId: "fail" }, testDataFile);
+                } catch (err) {
+                    readErrThrew = true;
+                    assert.ok(
+                        err.message.includes("EACCES"),
+                        `Expected EACCES in error message. Received: "${err.message}"`
+                    );
+                }
+                assert.equal(readErrThrew, true, "savePlan must abort and propagate on persistent read failure");
+                console.log("✓ Persistent read failure caught; destructive write strictly blocked");
+            } finally {
+                fs.readFileSync = originalReadFileSync;
+            }
+        } finally {
+            try { if (fs.existsSync(testDataFile)) fs.unlinkSync(testDataFile); } catch {}
+            try { if (fs.existsSync(`${testDataFile}.lock`)) fs.unlinkSync(`${testDataFile}.lock`); } catch {}
+        }
+        console.log("✓ Test 9 PASSED: Read failures prevent destructive overwrites; new installation handled cleanly.");
+
+        // Step 10: Regression Test: Eliminate Non-Atomic Fallback & Preserve Data on Rename Failure
+        console.log("\n--- Test 10: Eliminate Non-Atomic Fallback & Preserve Data on Rename Failure ---");
+
+        const testRenameFile = path.resolve(__dirname, `../studypilot-server/data/test_rename_${Date.now()}.json`);
+        const initialValidData = JSON.stringify({ original_plan: { planId: "original_plan", hours: 40 } }, null, 2);
+        fs.writeFileSync(testRenameFile, initialValidData, "utf-8");
+
+        const originalRenameSync = fs.renameSync;
+        let renameAttemptCount = 0;
+
+        try {
+            // Simulate rename failure (e.g. EPERM / EBUSY / antivirus lock on Windows)
+            fs.renameSync = (oldPath, newPath) => {
+                if (newPath === testRenameFile) {
+                    renameAttemptCount++;
+                    const err = new Error("EPERM: operation not permitted, rename");
+                    err.code = "EPERM";
+                    throw err;
+                }
+                return originalRenameSync(oldPath, newPath);
+            };
+
+            let renameFailed = false;
+            try {
+                savePlan("rename_fail_test", {
+                    planId: "rename_fail_test",
+                    subjects: { Test: {} }
+                }, testRenameFile);
+            } catch (err) {
+                renameFailed = true;
+                assert.ok(
+                    err.message.includes("Atomic replacement failed") || err.message.includes("Storage save error"),
+                    `Expected atomic replacement error message. Received: "${err.message}"`
+                );
+            }
+
+            assert.equal(renameFailed, true, "savePlan must throw when atomic rename fails");
+            assert.ok(renameAttemptCount > 0, "Rename retries must have been attempted");
+
+            // Verify test file was NOT overwritten or truncated by any non-atomic write fallback
+            const dataAfterRenameFail = fs.readFileSync(testRenameFile, "utf-8");
+            assert.equal(
+                dataAfterRenameFail,
+                initialValidData,
+                "Target file must remain 100% intact and uncorrupted when atomic replacement fails"
+            );
+
+            console.log("✓ Rename failure simulation confirmed: non-atomic fallback eliminated, original file preserved");
+        } finally {
+            fs.renameSync = originalRenameSync;
+            try { if (fs.existsSync(testRenameFile)) fs.unlinkSync(testRenameFile); } catch {}
+            try { if (fs.existsSync(`${testRenameFile}.lock`)) fs.unlinkSync(`${testRenameFile}.lock`); } catch {}
+        }
+
+        console.log("✓ Test 10 PASSED: Atomic rename failure safely preserves original data without truncation fallback.");
+
+        // Step 11: Regression Test: Transactional Updates & Concurrent Mutation Safety
+        console.log("\n--- Test 11: Transactional Updates & Concurrent Mutation Safety ---");
+
+        // 11a. True cross-process concurrent updates via child processes on an isolated storage file
+        const crossProcPlanId = `cproc_plan_${Date.now()}`;
+        const testFileCrossProc = path.resolve(__dirname, `../studypilot-server/data/test_cproc_${Date.now()}.json`);
+
+        try {
+            savePlan(crossProcPlanId, {
+                planId: crossProcPlanId,
+                examDate: "2026-12-31",
+                daysRemaining: 50,
+                dailyAvailableHours: 4,
+                availableCapacityHours: 200,
+                totalAvailableHours: 200,
+                totalAllocatedHours: 200,
+                totalCompletedHours: 0,
+                totalMissedHours: 0,
+                totalRemainingHours: 200,
+                overallProgressPercentage: 0,
+                subjects: {
+                    Mathematics: {
+                        priority: "high",
+                        weight: 3,
+                        allocatedHours: 120,
+                        completedHours: 0,
+                        missedHours: 0,
+                        remainingHours: 120,
+                        progressPercentage: 0
+                    },
+                    Physics: {
+                        priority: "medium",
+                        weight: 2,
+                        allocatedHours: 80,
+                        completedHours: 0,
+                        missedHours: 0,
+                        remainingHours: 80,
+                        progressPercentage: 0
+                    }
+                },
+                sessions: [],
+                adaptationHistory: []
+            }, testFileCrossProc);
+
+            const storageUrl = pathToFileURL(path.resolve(__dirname, "../studypilot-server/storage.js")).href;
+            const plannerUrl = pathToFileURL(path.resolve(__dirname, "../studypilot-server/planner.js")).href;
+            const targetFilePath = testFileCrossProc;
+
+            const childSessions = [
+                { subject: "Mathematics", hoursSpent: 2, status: "completed" },
+                { subject: "Mathematics", hoursSpent: 3, status: "completed" },
+                { subject: "Physics", hoursSpent: 1.5, status: "completed" },
+                { subject: "Physics", hoursSpent: 0, scheduledHours: 2, status: "missed" }
+            ];
+
+            // Launch genuine independent Node OS processes simultaneously contending on cross-process file lock
+            const workerPromises = childSessions.map(sess => new Promise((resolve, reject) => {
+                const code = `
+                    import { updatePlan } from ${JSON.stringify(storageUrl)};
+                    import { recordSession } from ${JSON.stringify(plannerUrl)};
+                    updatePlan(${JSON.stringify(crossProcPlanId)}, (plan) => recordSession(plan, ${JSON.stringify(sess)}), ${JSON.stringify(targetFilePath)});
+                `;
+                const proc = spawn("node", ["--input-type=module", "-e", code], { stdio: "inherit" });
+                proc.on("close", (code) => {
+                    if (code === 0) resolve();
+                    else reject(new Error(`Worker process exited with code ${code}`));
+                });
+                proc.on("error", reject);
+            }));
+
+            await Promise.all(workerPromises);
+
+            const finalCrossProcPlan = getPlan(crossProcPlanId, testFileCrossProc);
+            assert.equal(finalCrossProcPlan.sessions.length, 4, "All 4 cross-process concurrent sessions must be retained");
+            assert.equal(finalCrossProcPlan.totalCompletedHours, 6.5, "Cross-process completed hours must equal 2 + 3 + 1.5 = 6.5h");
+            assert.equal(finalCrossProcPlan.totalMissedHours, 2, "Cross-process missed hours must equal 2h");
+            assert.equal(finalCrossProcPlan.subjects.Mathematics.completedHours, 5, "Math completed hours must equal 2 + 3 = 5h");
+            assert.equal(finalCrossProcPlan.subjects.Physics.completedHours, 1.5, "Physics completed hours must equal 1.5h");
+            assert.equal(finalCrossProcPlan.subjects.Physics.missedHours, 2, "Physics missed hours must equal 2h");
+            console.log("✓ True cross-process concurrent transactions verified across independent OS processes");
+
+            // 11b. Verify mutator failure receives isolated plan and does NOT mutate stored state
+            let mutatorFailed = false;
+            try {
+                updatePlan(crossProcPlanId, (plan) => {
+                    // Dirty the plan object
+                    plan.sessions.push({ corrupted: true });
+                    plan.totalCompletedHours = 9999;
+                    throw new Error("Simulated business logic failure during session recording");
+                }, testFileCrossProc);
+            } catch (err) {
+                mutatorFailed = true;
+                assert.ok(err.message.includes("Simulated business logic failure"));
+            }
+            assert.equal(mutatorFailed, true, "updatePlan must propagate mutator errors");
+
+            const planAfterFailedMutator = getPlan(crossProcPlanId, testFileCrossProc);
+            assert.equal(planAfterFailedMutator.sessions.length, 4, "Failed mutator must NOT partially persist mutations");
+            assert.equal(planAfterFailedMutator.totalCompletedHours, 6.5, "Failed mutator must NOT mutate stored completed hours");
+            console.log("✓ Failed mutator transaction isolated cleanly without in-memory or on-disk mutation");
+
+            // 11c. Test end-to-end concurrent MCP tool calls on the live server
+            const mcpConcurrentPlanId = `mcp_concurrent_${Date.now()}`;
+            await client.callTool({
+                name: "create_study_plan",
+                arguments: {
+                    planId: mcpConcurrentPlanId,
+                    subjects: ["Mathematics", "Physics"],
+                    examDate: "2026-11-30",
+                    dailyAvailableHours: 3
+                }
+            });
+
+            const mcpConcurrentCalls = [
+                { name: "record_study_session", arguments: { planId: mcpConcurrentPlanId, subject: "Mathematics", hoursSpent: 2, status: "completed" } },
+                { name: "record_study_session", arguments: { planId: mcpConcurrentPlanId, subject: "Physics", hoursSpent: 1.5, status: "completed" } },
+                { name: "record_study_session", arguments: { planId: mcpConcurrentPlanId, subject: "Mathematics", hoursSpent: 0, scheduledHours: 2, status: "missed" } }
+            ];
+
+            const mcpResults = await Promise.all(mcpConcurrentCalls.map(call => client.callTool(call)));
+            for (const res of mcpResults) {
+                assert.equal(Boolean(res.isError), false, `Concurrent MCP call failed: ${JSON.stringify(res.content)}`);
+            }
+
+            const mcpPlanResult = await client.callTool({
+                name: "get_study_plan",
+                arguments: { planId: mcpConcurrentPlanId }
+            });
+            const retrievedMcpPlan = JSON.parse(mcpPlanResult.content[0].text);
+            assert.equal(retrievedMcpPlan.totalSessionsRecorded, 3, "All 3 concurrent MCP sessions must be recorded");
+            assert.equal(retrievedMcpPlan.totalCompletedHours, 3.5, "Total completed hours must equal 3.5h");
+            assert.equal(retrievedMcpPlan.totalMissedHours, 2, "Total missed hours must equal 2h");
+            console.log("✓ Live MCP server concurrent session recording verified end-to-end");
+
+            // 11d. Test concurrent adaptation and session recording on the live server
+            const mcpAdaptPlanId = `mcp_adapt_concurrent_${Date.now()}`;
+            await client.callTool({
+                name: "create_study_plan",
+                arguments: {
+                    planId: mcpAdaptPlanId,
+                    subjects: ["Mathematics", "Physics"],
+                    examDate: "2026-11-30",
+                    dailyAvailableHours: 3
+                }
+            });
+
+            const mixedResults = await Promise.all([
+                client.callTool({
+                    name: "record_study_session",
+                    arguments: { planId: mcpAdaptPlanId, subject: "Mathematics", hoursSpent: 2, status: "completed" }
+                }),
+                client.callTool({
+                    name: "adapt_study_plan",
+                    arguments: { planId: mcpAdaptPlanId, reason: "Concurrent pace adaptation" }
+                }),
+                client.callTool({
+                    name: "record_study_session",
+                    arguments: { planId: mcpAdaptPlanId, subject: "Physics", hoursSpent: 1.5, status: "completed" }
+                })
+            ]);
+
+            for (const res of mixedResults) {
+                assert.equal(Boolean(res.isError), false, `Mixed concurrent MCP call failed: ${JSON.stringify(res.content)}`);
+            }
+
+            const mixedPlanResult = await client.callTool({
+                name: "get_study_plan",
+                arguments: { planId: mcpAdaptPlanId }
+            });
+            const retrievedMixedPlan = JSON.parse(mixedPlanResult.content[0].text);
+            assert.equal(retrievedMixedPlan.totalSessionsRecorded, 2, "Both concurrent sessions must be retained");
+            assert.equal(retrievedMixedPlan.totalCompletedHours, 3.5, "Completed hours from both sessions must be preserved (2 + 1.5 = 3.5h)");
+            assert.ok(retrievedMixedPlan.recentAdaptations.length >= 1, "Concurrent adaptation must be retained");
+            console.log("✓ Concurrent adaptation and session recording preserved both sessions and adaptation history");
+
+        } finally {
+            try { if (fs.existsSync(testFileCrossProc)) fs.unlinkSync(testFileCrossProc); } catch {}
+            try { if (fs.existsSync(`${testFileCrossProc}.lock`)) fs.unlinkSync(`${testFileCrossProc}.lock`); } catch {}
+        }
+
+        console.log("✓ Test 11 PASSED: Transactional updates prevent lost updates under concurrency.");
+
+
         console.log("\n========================================================");
-        console.log("ALL 7 DETERMINISTIC & REGRESSION TESTS PASSED! (100%)");
+        console.log("ALL 11 DETERMINISTIC & REGRESSION TESTS PASSED! (100%)");
         console.log("========================================================");
 
         await client.close();
-        process.exit(0);
     } catch (error) {
         console.error("\n❌ Test failure:", error);
         try {
@@ -304,4 +731,7 @@ async function runDeterministicTests() {
     }
 }
 
-runDeterministicTests();
+runDeterministicTests().catch(err => {
+    console.error("Test execution failed:", err);
+    process.exit(1);
+});
