@@ -3,6 +3,8 @@
  * Core algorithms for study schedule generation, progress tracking, and adaptive rescheduling.
  */
 
+export const DEFAULT_MISSED_SESSION_HOURS = 2;
+
 const PRIORITY_WEIGHTS = {
     high: 3,
     medium: 2,
@@ -200,6 +202,7 @@ export function createPlan({
         examDate,
         daysRemaining,
         dailyAvailableHours: dailyHours,
+        availableCapacityHours: totalAvailableHours,
         totalAvailableHours,
         totalAllocatedHours: Object.values(subjectsData).reduce((acc, s) => acc + s.allocatedHours, 0),
         totalCompletedHours: 0,
@@ -213,11 +216,58 @@ export function createPlan({
 }
 
 /**
+ * Normalizes an existing study plan to ensure all accounting invariants hold:
+ * 1. Missed sessions record explicit missedHours matching subject/plan missed accounting.
+ * 2. Completed sessions record explicit hoursSpent.
+ * 3. Plan totals and capacity figures are synchronized.
+ */
+export function normalizePlan(plan) {
+    if (!plan || !plan.subjects) return plan;
+
+    if (Array.isArray(plan.sessions)) {
+        for (const sess of plan.sessions) {
+            const sub = plan.subjects[sess.subject];
+            const isMissed = sess.status === "missed";
+
+            if (isMissed) {
+                if (sess.missedHours === undefined || sess.missedHours === null) {
+                    sess.missedHours = sess.hoursSpent > 0
+                        ? sess.hoursSpent
+                        : (sub?.missedHours && sub.missedHours > 0 ? sub.missedHours : DEFAULT_MISSED_SESSION_HOURS);
+                }
+                if (sess.scheduledHours === undefined || sess.scheduledHours === null) {
+                    sess.scheduledHours = sess.missedHours;
+                }
+            } else {
+                if (sess.missedHours === undefined || sess.missedHours === null) {
+                    sess.missedHours = 0;
+                }
+                if (sess.scheduledHours === undefined || sess.scheduledHours === null) {
+                    sess.scheduledHours = sess.hoursSpent || 0;
+                }
+            }
+        }
+    }
+
+    refreshPlanTotals(plan);
+    return plan;
+}
+
+/**
  * Records a study session (completed or missed) and updates metrics
+ *
+ * Missed Session Accounting Rule:
+ * - hoursSpent: indicates actual study time spent (typically 0 when missed).
+ * - missedHours: indicates scheduled session duration that was missed.
+ *   If scheduledHours (or positive hoursSpent) is provided, that duration is used.
+ *   Otherwise, defaults to DEFAULT_MISSED_SESSION_HOURS (2.0 hours).
+ * - Corresponding data: missedHours is recorded directly on the sessionRecord in plan.sessions,
+ *   guaranteeing subject.missedHours and plan.totalMissedHours equal the sum of missed session records.
  */
 export function recordSession(plan, {
     subject,
     hoursSpent = 0,
+    scheduledHours = null,
     status = "completed",
     notes = "",
     date = new Date().toISOString().split("T")[0]
@@ -225,6 +275,8 @@ export function recordSession(plan, {
     if (!plan || !plan.subjects) {
         throw new Error("Invalid plan provided.");
     }
+
+    normalizePlan(plan);
 
     const cleanSubject = String(subject).trim();
     let targetSubject = plan.subjects[cleanSubject];
@@ -234,10 +286,10 @@ export function recordSession(plan, {
         plan.subjects[cleanSubject] = {
             priority: "medium",
             weight: 2,
-            allocatedHours: Number(hoursSpent) || 2,
+            allocatedHours: Number(hoursSpent) || DEFAULT_MISSED_SESSION_HOURS,
             completedHours: 0,
             missedHours: 0,
-            remainingHours: Number(hoursSpent) || 2,
+            remainingHours: Number(hoursSpent) || DEFAULT_MISSED_SESSION_HOURS,
             progressPercentage: 0
         };
         targetSubject = plan.subjects[cleanSubject];
@@ -246,11 +298,32 @@ export function recordSession(plan, {
     const hours = Number(hoursSpent) || 0;
     const normalizedStatus = status.toLowerCase();
 
+    let sessionMissedHours = 0;
+    let sessionScheduledHours = scheduledHours !== null && scheduledHours !== undefined ? Number(scheduledHours) : 0;
+
+    if (normalizedStatus === "missed") {
+        if (sessionScheduledHours > 0) {
+            sessionMissedHours = sessionScheduledHours;
+        } else if (hours > 0) {
+            sessionMissedHours = hours;
+            sessionScheduledHours = hours;
+        } else {
+            sessionMissedHours = DEFAULT_MISSED_SESSION_HOURS;
+            sessionScheduledHours = DEFAULT_MISSED_SESSION_HOURS;
+        }
+    } else {
+        if (!sessionScheduledHours) {
+            sessionScheduledHours = hours;
+        }
+    }
+
     const sessionRecord = {
         id: `sess_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
         date,
         subject: cleanSubject,
         hoursSpent: hours,
+        missedHours: sessionMissedHours,
+        scheduledHours: sessionScheduledHours,
         status: normalizedStatus,
         notes: notes || "",
         timestamp: new Date().toISOString()
@@ -262,9 +335,8 @@ export function recordSession(plan, {
         targetSubject.completedHours = Math.round((targetSubject.completedHours + hours) * 10) / 10;
         targetSubject.remainingHours = Math.max(0, Math.round((targetSubject.allocatedHours - targetSubject.completedHours) * 10) / 10);
     } else if (normalizedStatus === "missed") {
-        const missedAmount = hours > 0 ? hours : 2; // Default 2 hours penalty if 0 given for missed
-        targetSubject.missedHours = Math.round((targetSubject.missedHours + missedAmount) * 10) / 10;
-        targetSubject.unadaptedMissedHours = Math.round(((targetSubject.unadaptedMissedHours || 0) + missedAmount) * 10) / 10;
+        targetSubject.missedHours = Math.round((targetSubject.missedHours + sessionMissedHours) * 10) / 10;
+        targetSubject.unadaptedMissedHours = Math.round(((targetSubject.unadaptedMissedHours || 0) + sessionMissedHours) * 10) / 10;
     }
 
     // Update progress percentages
@@ -288,7 +360,16 @@ export function recordSession(plan, {
 }
 
 /**
- * Re-balances remaining schedule and adapts study plan based on actual pace and missed sessions
+ * Re-balances remaining schedule and adapts study plan based on actual pace and missed sessions.
+ *
+ * Capacity & Allocation Invariants:
+ * 1. availableHoursCapacity = daysRemaining * dailyAvailableHours (capacity available for remaining study).
+ * 2. If totalNeededHours <= availableHoursCapacity, remaining workload is allocated exactly.
+ * 3. If totalNeededHours > availableHoursCapacity (constrained capacity), the available capacity
+ *    is allocated across subjects according to priority weights and deficit share, so that
+ *    sum(remainingHours) === availableHoursCapacity.
+ * 4. totalAllocatedHours === totalCompletedHours + totalRemainingHours.
+ * 5. capacityWarning accurately reflects actual remaining workload vs available capacity.
  */
 export function adaptPlan(plan, {
     reason = "Automatic progress adaptation",
@@ -299,6 +380,8 @@ export function adaptPlan(plan, {
     if (!plan || !plan.subjects) {
         throw new Error("Invalid plan provided for adaptation.");
     }
+
+    normalizePlan(plan);
 
     const previousAllocations = {};
     for (const [name, sub] of Object.entries(plan.subjects)) {
@@ -319,7 +402,7 @@ export function adaptPlan(plan, {
     plan.daysRemaining = daysRemaining;
 
     const availableHoursCapacity = Math.round(daysRemaining * plan.dailyAvailableHours * 10) / 10;
-    plan.totalAvailableHours = availableHoursCapacity;
+    plan.availableCapacityHours = availableHoursCapacity;
 
     // Calculate total required remaining hours
     let totalNeededHours = 0;
@@ -327,21 +410,28 @@ export function adaptPlan(plan, {
 
     for (const [name, sub] of Object.entries(plan.subjects)) {
         // Base remaining is target - completed
-        let remaining = Math.max(0, sub.allocatedHours - sub.completedHours);
+        let remaining = Math.max(0, Math.round((sub.allocatedHours - sub.completedHours) * 10) / 10);
 
         // If there were unadapted missed hours, add them to needed hours as backlog recovery
-        const missedBacklog = sub.unadaptedMissedHours !== undefined ? sub.unadaptedMissedHours : (sub.missedHours || 0);
+        const missedBacklog = sub.unadaptedMissedHours !== undefined ? sub.unadaptedMissedHours : 0;
         if (missedBacklog > 0) {
-            remaining += missedBacklog;
+            remaining = Math.round((remaining + missedBacklog) * 10) / 10;
         }
 
         subjectDeficits[name] = remaining;
         totalNeededHours += remaining;
     }
+    totalNeededHours = Math.round(totalNeededHours * 10) / 10;
+
+    const isOverCapacity = totalNeededHours > availableHoursCapacity;
 
     // Determine recommended daily study pace
-    const recommendedDailyHours = Math.round((totalNeededHours / daysRemaining) * 10) / 10;
-    const isOverCapacity = totalNeededHours > availableHoursCapacity;
+    const paceRequired = totalNeededHours / daysRemaining;
+    let recommendedDailyHours = Math.round(paceRequired * 10) / 10;
+    if (isOverCapacity) {
+        const ceilDaily = Math.ceil(paceRequired * 10) / 10;
+        recommendedDailyHours = Math.max(ceilDaily, Math.round((plan.dailyAvailableHours + 0.1) * 10) / 10);
+    }
 
     // Adjust subject allocations according to priorities and remaining load
     let totalWeight = 0;
@@ -349,31 +439,55 @@ export function adaptPlan(plan, {
         totalWeight += sub.weight || 2;
     }
 
-    // Reallocate remaining hours across subjects
-    for (const [name, sub] of Object.entries(plan.subjects)) {
-        // New remaining hours balances subject deficit with priority weight
-        const deficit = subjectDeficits[name] || 0;
-        const weightShare = (sub.weight || 2) / totalWeight;
+    const subjectNames = Object.keys(plan.subjects);
 
-        // If capacity is constrained, balance proportionally
-        let newRemaining;
-        if (isOverCapacity) {
-            // Allocate available hours based on weight & deficit
-            newRemaining = Math.max(1, Math.round(((deficit * 0.7) + (availableHoursCapacity * weightShare * 0.3)) * 10) / 10);
-        } else {
-            newRemaining = Math.round(deficit * 10) / 10;
-        }
+    if (isOverCapacity) {
+        // Capacity is constrained: allocate availableHoursCapacity across subjects
+        // balancing deficit share (70%) and priority weight share (30%)
+        let allocatedRemainingSum = 0;
 
-        sub.remainingHours = newRemaining;
-        sub.allocatedHours = Math.round((sub.completedHours + newRemaining) * 10) / 10;
-        // Mark backlog as adapted while preserving historical missedHours on subject
-        sub.unadaptedMissedHours = 0;
-        sub.progressPercentage = sub.allocatedHours > 0
-            ? Math.min(100, Math.round((sub.completedHours / sub.allocatedHours) * 100))
-            : 100;
+        subjectNames.forEach((name, index) => {
+            const sub = plan.subjects[name];
+            const deficit = subjectDeficits[name] || 0;
+            const deficitShare = totalNeededHours > 0 ? (deficit / totalNeededHours) : (1 / subjectNames.length);
+            const weightShare = (sub.weight || 2) / (totalWeight || 1);
+            const blendedShare = (deficitShare * 0.7) + (weightShare * 0.3);
+
+            let newRemaining;
+            if (index === subjectNames.length - 1) {
+                // Remainder ensures sum of newRemaining === availableHoursCapacity exactly
+                newRemaining = Math.max(1, Math.round((availableHoursCapacity - allocatedRemainingSum) * 10) / 10);
+            } else {
+                newRemaining = Math.max(1, Math.round((availableHoursCapacity * blendedShare) * 10) / 10);
+                allocatedRemainingSum += newRemaining;
+            }
+
+            sub.remainingHours = newRemaining;
+            sub.allocatedHours = Math.round((sub.completedHours + newRemaining) * 10) / 10;
+            sub.unadaptedMissedHours = 0;
+            sub.progressPercentage = sub.allocatedHours > 0
+                ? Math.min(100, Math.round((sub.completedHours / sub.allocatedHours) * 100))
+                : 100;
+        });
+    } else {
+        // Within capacity: allocate exact deficit to each subject
+        subjectNames.forEach(name => {
+            const sub = plan.subjects[name];
+            const deficit = subjectDeficits[name] || 0;
+            sub.remainingHours = Math.round(deficit * 10) / 10;
+            sub.allocatedHours = Math.round((sub.completedHours + sub.remainingHours) * 10) / 10;
+            sub.unadaptedMissedHours = 0;
+            sub.progressPercentage = sub.allocatedHours > 0
+                ? Math.min(100, Math.round((sub.completedHours / sub.allocatedHours) * 100))
+                : 100;
+        });
     }
 
     refreshPlanTotals(plan);
+
+    const capacityWarning = isOverCapacity
+        ? `Remaining study workload (${totalNeededHours}h) exceeds available capacity (${availableHoursCapacity}h). Schedule allocates ${availableHoursCapacity}h. Recommended daily hours: ${recommendedDailyHours}h.`
+        : null;
 
     const adaptationEntry = {
         id: `adapt_${Date.now()}`,
@@ -381,9 +495,10 @@ export function adaptPlan(plan, {
         reason,
         daysRemaining,
         availableCapacityHours: availableHoursCapacity,
+        totalNeededHours,
         totalRemainingHours: plan.totalRemainingHours,
         recommendedDailyHours,
-        capacityWarning: isOverCapacity ? `Remaining study workload exceeds current daily schedule. Recommended daily hours: ${recommendedDailyHours}h.` : null,
+        capacityWarning,
         previousAllocations,
         newAllocations: Object.fromEntries(
             Object.entries(plan.subjects).map(([k, v]) => [k, { allocatedHours: v.allocatedHours, remainingHours: v.remainingHours }])
@@ -399,9 +514,9 @@ export function adaptPlan(plan, {
 }
 
 /**
- * Recomputes top-level totals on the plan object
+ * Recomputes top-level totals on the plan object and enforces accounting consistency
  */
-function refreshPlanTotals(plan) {
+export function refreshPlanTotals(plan) {
     let completed = 0;
     let missed = 0;
     let remaining = 0;
@@ -419,7 +534,14 @@ function refreshPlanTotals(plan) {
     plan.totalRemainingHours = Math.round(remaining * 10) / 10;
     plan.totalAllocatedHours = Math.round(allocated * 10) / 10;
 
+    if (plan.daysRemaining && plan.dailyAvailableHours) {
+        const remainingCapacity = Math.round(plan.daysRemaining * plan.dailyAvailableHours * 10) / 10;
+        plan.availableCapacityHours = remainingCapacity;
+        plan.totalAvailableHours = Math.round((plan.totalCompletedHours + remainingCapacity) * 10) / 10;
+    }
+
     plan.overallProgressPercentage = plan.totalAllocatedHours > 0
         ? Math.min(100, Math.round((plan.totalCompletedHours / plan.totalAllocatedHours) * 100))
         : 0;
 }
+

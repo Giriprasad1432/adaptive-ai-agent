@@ -161,8 +161,136 @@ async function runDeterministicTests() {
         console.log(`  Adaptations recorded: ${finalData.recentAdaptations.length}`);
         console.log(`  Total completed: ${finalData.totalCompletedHours}h, Total remaining: ${finalData.totalRemainingHours}h`);
 
+        // Step 9: Regression Suite for Study-Plan Accounting and Adaptation Consistency (adaptive-demo)
+        console.log(`\n--- Test 7: Regression: Accounting & Adaptation Consistency for "adaptive-demo" ---`);
+        const demoPlanId = "adaptive-demo";
+
+        // 7.1 Create plan
+        const createDemoRes = await client.callTool({
+            name: "create_study_plan",
+            arguments: {
+                planId: demoPlanId,
+                subjects: ["Mathematics", "Physics", "Chemistry"],
+                examDate: "2026-11-30",
+                dailyAvailableHours: 3,
+                priorities: { Mathematics: "high", Physics: "medium", Chemistry: "low" }
+            }
+        });
+        assert.equal(Boolean(createDemoRes.isError), false, "create_study_plan failed for adaptive-demo");
+
+        // 7.2 Record completed Mathematics session (1.5 hours)
+        const recordMathRes = await client.callTool({
+            name: "record_study_session",
+            arguments: {
+                planId: demoPlanId,
+                subject: "Mathematics",
+                hoursSpent: 1.5,
+                status: "completed",
+                notes: "Calculus practice"
+            }
+        });
+        assert.equal(Boolean(recordMathRes.isError), false, "record Math session failed");
+
+        // 7.3 Record missed Chemistry session (0 hours spent)
+        const recordChemRes = await client.callTool({
+            name: "record_study_session",
+            arguments: {
+                planId: demoPlanId,
+                subject: "Chemistry",
+                hoursSpent: 0,
+                status: "missed",
+                notes: "Lab session cancelled"
+            }
+        });
+        assert.equal(Boolean(recordChemRes.isError), false, "record Chemistry missed session failed");
+        const chemSessionData = JSON.parse(recordChemRes.content[0].text);
+        assert.equal(chemSessionData.session.hoursSpent, 0, "Missed session actual hoursSpent must be 0");
+        assert.equal(chemSessionData.session.missedHours, 2, "Missed session missedHours must be explicitly recorded as 2");
+        assert.equal(chemSessionData.subjectProgress.missedHours, 2, "Chemistry missedHours must be 2");
+
+        // 7.4 Adapt study plan
+        const adaptDemoRes = await client.callTool({
+            name: "adapt_study_plan",
+            arguments: {
+                planId: demoPlanId,
+                reason: "Rebalance schedule after missed Chemistry session"
+            }
+        });
+        assert.equal(Boolean(adaptDemoRes.isError), false, "adapt_study_plan failed for adaptive-demo");
+        const adaptDemoData = JSON.parse(adaptDemoRes.content[0].text);
+
+        // Verification of adaptation calculations
+        assert.equal(adaptDemoData.daysRemaining, 49, "Days remaining must be 49");
+        assert.equal(adaptDemoData.recommendedDailyHours, 3.1, "Recommended daily pace must be 3.1h/day when over capacity");
+        assert.ok(adaptDemoData.capacityWarning, "Capacity warning must be present when workload exceeds capacity");
+        assert.ok(
+            adaptDemoData.capacityWarning.includes("exceeds available capacity (147h)"),
+            `Warning must mention 147h available capacity: "${adaptDemoData.capacityWarning}"`
+        );
+        assert.ok(
+            adaptDemoData.capacityWarning.includes("Recommended daily hours: 3.1h"),
+            `Warning must recommend 3.1h: "${adaptDemoData.capacityWarning}"`
+        );
+
+        // Verify adjusted allocations preserve priorities and do not exceed capacity (147h)
+        const allocations = adaptDemoData.adjustedSubjectAllocations;
+        assert.ok(allocations.Mathematics, "Mathematics must be present");
+        assert.ok(allocations.Physics, "Physics must be present");
+        assert.ok(allocations.Chemistry, "Chemistry must be present");
+        assert.equal(allocations.Mathematics.priority, "high");
+        assert.equal(allocations.Physics.priority, "medium");
+        assert.equal(allocations.Chemistry.priority, "low");
+
+        // High priority Math has higher allocation than medium Physics, which has higher than low Chem
+        assert.ok(allocations.Mathematics.remainingHours > allocations.Physics.remainingHours, "Math remaining > Physics remaining");
+        assert.ok(allocations.Physics.remainingHours > allocations.Chemistry.remainingHours, "Physics remaining > Chemistry remaining");
+
+        const remainingSum = Math.round((allocations.Mathematics.remainingHours + allocations.Physics.remainingHours + allocations.Chemistry.remainingHours) * 10) / 10;
+        assert.equal(remainingSum, 147.0, `Remaining hours sum (${remainingSum}) must equal available capacity (147.0h), never exceeding it`);
+
+        // 7.5 Retrieve plan via get_study_plan and verify complete accounting invariants & persistence
+        const getDemoRes = await client.callTool({
+            name: "get_study_plan",
+            arguments: { planId: demoPlanId }
+        });
+        assert.equal(Boolean(getDemoRes.isError), false, "get_study_plan failed for adaptive-demo");
+        const retrievedPlan = JSON.parse(getDemoRes.content[0].text);
+
+        assert.equal(retrievedPlan.planId, "adaptive-demo");
+        assert.equal(retrievedPlan.examDate, "2026-11-30");
+        assert.equal(retrievedPlan.daysRemaining, 49);
+        assert.equal(retrievedPlan.dailyStudyHours, 3);
+        assert.equal(retrievedPlan.availableCapacityHours, 147);
+        assert.equal(retrievedPlan.totalRemainingHours, 147);
+        assert.equal(retrievedPlan.totalCompletedHours, 1.5);
+        assert.equal(retrievedPlan.totalMissedHours, 2);
+        assert.equal(retrievedPlan.totalAllocatedHours, 148.5);
+        assert.equal(retrievedPlan.totalSessionsRecorded, 2);
+
+        // Verify recent sessions list contains explicit data for both sessions
+        assert.equal(retrievedPlan.recentSessions.length, 2);
+        const mathSess = retrievedPlan.recentSessions.find(s => s.subject === "Mathematics");
+        const chemSess = retrievedPlan.recentSessions.find(s => s.subject === "Chemistry");
+        assert.ok(mathSess, "Math session must be in recentSessions");
+        assert.equal(mathSess.hoursSpent, 1.5);
+        assert.equal(mathSess.missedHours, 0);
+        assert.equal(mathSess.status, "completed");
+
+        assert.ok(chemSess, "Chemistry session must be in recentSessions");
+        assert.equal(chemSess.hoursSpent, 0);
+        assert.equal(chemSess.missedHours, 2, "Chemistry missed session must explicitly document 2 missedHours");
+        assert.equal(chemSess.status, "missed");
+
+        // Verify accounting invariants on subject level
+        for (const [sName, sData] of Object.entries(retrievedPlan.subjects)) {
+            const expectedAllocated = Math.round((sData.completedHours + sData.remainingHours) * 10) / 10;
+            assert.equal(sData.allocatedHours, expectedAllocated, `Subject ${sName}: allocatedHours must equal completedHours + remainingHours`);
+        }
+
+        console.log("✓ Test 7 PASSED: Study-plan accounting invariants, missed session tracking, and capacity-constrained adaptation verified!");
+
         console.log("\n========================================================");
-        console.log("ALL 6 DETERMINISTIC TESTS PASSED SUCCESSFULLY! (100%)");
+        console.log("ALL 7 DETERMINISTIC & REGRESSION TESTS PASSED! (100%)");
         console.log("========================================================");
 
         await client.close();

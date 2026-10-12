@@ -136,6 +136,9 @@ mcp.tool(
                 totalCompletedHours: plan.totalCompletedHours,
                 totalMissedHours: plan.totalMissedHours,
                 totalRemainingHours: plan.totalRemainingHours,
+                totalAllocatedHours: plan.totalAllocatedHours,
+                totalAvailableHours: plan.totalAvailableHours,
+                availableCapacityHours: plan.availableCapacityHours || Math.round((plan.daysRemaining * plan.dailyAvailableHours) * 10) / 10,
                 subjects: plan.subjects,
                 totalSessionsRecorded: plan.sessions.length,
                 recentSessions: plan.sessions.slice(-5),
@@ -173,11 +176,12 @@ mcp.tool(
         subject: z.string().describe("Subject name (e.g. 'Mathematics')"),
         hoursSpent: z.number().describe("Hours spent studying, or 0 if session was missed"),
         status: z.enum(["completed", "partially_completed", "missed"]).describe("Session status: 'completed', 'partially_completed', or 'missed'"),
+        scheduledHours: z.number().optional().describe("Optional scheduled duration of the session in hours (useful for missed sessions; defaults to 2h)"),
         notes: z.string().optional().describe("Optional notes or reason for missed session"),
         date: z.string().optional().describe("Date of session in YYYY-MM-DD format (defaults to today)"),
         planId: z.string().optional().describe("Unique identifier of the study plan to record session into. Must not be a tool name. Defaults to 'default'")
     },
-    async ({ subject, hoursSpent, status, notes, date, planId = "default" }) => {
+    async ({ subject, hoursSpent, status, scheduledHours, notes, date, planId = "default" }) => {
         try {
             const plan = getPlan(planId);
             if (!plan) {
@@ -195,6 +199,7 @@ mcp.tool(
             const result = recordSession(plan, {
                 subject,
                 hoursSpent,
+                scheduledHours,
                 status,
                 notes,
                 date

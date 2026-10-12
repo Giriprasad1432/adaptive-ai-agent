@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizePlan } from "./planner.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,7 +71,11 @@ export function saveAllPlans(data) {
  */
 export function getPlan(planId = "default") {
     const plans = loadAllPlans();
-    return plans[planId] || null;
+    const plan = plans[planId] || null;
+    if (plan) {
+        normalizePlan(plan);
+    }
+    return plan;
 }
 
 /**
