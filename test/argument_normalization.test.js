@@ -3,7 +3,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent } from "../src/agent/normalizer.js";
 import { validateToolArguments, verifyToolResult } from "../src/agent/validator.js";
-import { detectDailyScheduleOverrun, verifyFinalAnswerConsistency } from "../src/agent/consistencyChecker.js";
+import {
+    detectDailyScheduleOverrun,
+    verifyFinalAnswerConsistency,
+    normalizeDateToISO,
+    isValidCalendarDate,
+    extractCanonicalDates,
+    isExamDateContradicted
+} from "../src/agent/consistencyChecker.js";
 import { McpClientManager } from "../src/mcp/mcpClient.js";
 import { AdaptiveAgent } from "../src/agent/adaptiveAgent.js";
 
@@ -1141,6 +1148,171 @@ Adjust as needed for your learning style.`
     assert.ok(verifiedPlan.totalMissedHours > 0 || verifiedPlan.recentSessions.some(s => s.status === "missed"), "Missed session history must be preserved");
 
     console.log("✓ Test 11 PASSED: Intent-based tool selection, planId preservation, grounding, and plan fidelity verified!");
+
+    // -------------------------------------------------------------
+    // Test 12: Final-Answer Consistency Checker Exam Date Normalization Suite
+    // -------------------------------------------------------------
+    console.log("\n--- Test 12: Final-Answer Consistency Checker Exam Date Normalization Suite ---");
+
+    // 12.1 Unit tests for strict calendar validation
+    assert.equal(isValidCalendarDate(2026, 11, 30), true, "2026-11-30 is valid");
+    assert.equal(isValidCalendarDate(2026, 2, 29), false, "2026-02-29 is not leap year");
+    assert.equal(isValidCalendarDate(2024, 2, 29), true, "2024-02-29 is leap year");
+    assert.equal(isValidCalendarDate(2026, 11, 31), false, "November 31 does not exist");
+    assert.equal(isValidCalendarDate(2026, 13, 1), false, "Month 13 does not exist");
+    console.log("✓ Strict calendar validation verified (leap years, month bounds, overflow prevention)");
+
+    // 12.2 Unit tests for normalizeDateToISO
+    assert.equal(normalizeDateToISO("2026-11-30"), "2026-11-30", "ISO format YYYY-MM-DD");
+    assert.equal(normalizeDateToISO("2026/11/30"), "2026-11-30", "Slash-delimited YYYY/MM/DD");
+    assert.equal(normalizeDateToISO("November 30, 2026"), "2026-11-30", "Full month Month DD, YYYY");
+    assert.equal(normalizeDateToISO("November 30th, 2026"), "2026-11-30", "Ordinal Month DDth, YYYY");
+    assert.equal(normalizeDateToISO("November 30 2026"), "2026-11-30", "Month DD YYYY without comma");
+    assert.equal(normalizeDateToISO("Nov 30, 2026"), "2026-11-30", "Abbreviated month Nov DD, YYYY");
+    assert.equal(normalizeDateToISO("Nov. 30, 2026"), "2026-11-30", "Abbreviated month with period Nov. DD, YYYY");
+    assert.equal(normalizeDateToISO("Nov. 30th, 2026"), "2026-11-30", "Abbreviated month with ordinal Nov. DDth, YYYY");
+    assert.equal(normalizeDateToISO("30 November 2026"), "2026-11-30", "Day-first format DD Month YYYY");
+    assert.equal(normalizeDateToISO("30th November 2026"), "2026-11-30", "Day-first ordinal DDth Month YYYY");
+    assert.equal(normalizeDateToISO("30th of November, 2026"), "2026-11-30", "Day-first with 'of' DDth of Month, YYYY");
+    assert.equal(normalizeDateToISO("11/30/2026"), "2026-11-30", "Numeric MM/DD/YYYY");
+    assert.equal(normalizeDateToISO("not-a-date"), null, "Invalid date string returns null");
+    assert.equal(normalizeDateToISO("November 31, 2026"), null, "Invalid calendar date returns null");
+    console.log("✓ Date parser accurately normalizes equivalent representations to canonical ISO YYYY-MM-DD");
+
+    // 12.3 Unit tests for isExamDateContradicted
+    assert.equal(isExamDateContradicted("Your exam date is 2026-11-30.", "2026-11-30"), false);
+    assert.equal(isExamDateContradicted("Your exam date is November 30, 2026.", "2026-11-30"), false);
+    assert.equal(isExamDateContradicted("Your exam date is November 30th, 2026.", "2026-11-30"), false);
+    assert.equal(isExamDateContradicted("Your target exam date is Nov 30, 2026.", "2026-11-30"), false);
+    assert.equal(isExamDateContradicted("The exam is scheduled for 30 November 2026.", "2026-11-30"), false);
+    assert.equal(isExamDateContradicted("The exam is scheduled for 30th of November, 2026.", "2026-11-30"), false);
+    assert.equal(isExamDateContradicted("Your exam date is December 25, 2026.", "2026-11-30"), true);
+    assert.equal(isExamDateContradicted("Your study plan has Mathematics, Physics, and Chemistry.", "2026-11-30"), true);
+    console.log("✓ isExamDateContradicted accepts equivalent representations and rejects contradictory/omitted dates");
+
+    // 12.4 verifyFinalAnswerConsistency: Regression tests for equivalent formats (Retrieval intent)
+    const mockRetrievalTools = [
+        {
+            toolName: "get_study_plan",
+            isError: false,
+            parsedData: {
+                planId: "adaptive-demo",
+                examDate: "2026-11-30",
+                dailyStudyHours: 3,
+                daysRemaining: 49,
+                subjects: {
+                    Mathematics: { allocatedHours: 74, priority: "high" },
+                    Physics: { allocatedHours: 49, priority: "medium" },
+                    Chemistry: { allocatedHours: 25.9, priority: "low" }
+                },
+                recentSessions: [
+                    { subject: "Mathematics", hoursSpent: 1.5, status: "completed" },
+                    { subject: "Chemistry", hoursSpent: 0, status: "missed" }
+                ],
+                totalSessionsRecorded: 2,
+                totalMissedHours: 2
+            }
+        }
+    ];
+    const userRetrievalMessage = "Retrieve study plan adaptive-demo. Report every subject, exam date, daily availability.";
+
+    // Equivalent Format A: "2026-11-30" (exact ISO)
+    const replyIso = `Here is your study plan details for "adaptive-demo":
+- Exam Date: 2026-11-30
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkIso = verifyFinalAnswerConsistency(replyIso, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkIso.valid, true, "Exact ISO format '2026-11-30' must pass consistency check");
+
+    // Equivalent Format B: "November 30, 2026" (Full month natural language)
+    const replyNaturalFull = `Here is your study plan details for "adaptive-demo":
+- Exam Date: November 30, 2026
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkNaturalFull = verifyFinalAnswerConsistency(replyNaturalFull, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkNaturalFull.valid, true, "Equivalent format 'November 30, 2026' must pass without false positive");
+
+    // Equivalent Format C: "November 30th, 2026" (Ordinal natural language)
+    const replyOrdinal = `Here is your study plan details for "adaptive-demo":
+- Exam Date: November 30th, 2026
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkOrdinal = verifyFinalAnswerConsistency(replyOrdinal, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkOrdinal.valid, true, "Equivalent format 'November 30th, 2026' must pass without false positive");
+
+    // Equivalent Format D: "Nov 30, 2026" (Abbreviated month)
+    const replyAbbrev = `Here is your study plan details for "adaptive-demo":
+- Exam Date: Nov 30, 2026
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkAbbrev = verifyFinalAnswerConsistency(replyAbbrev, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkAbbrev.valid, true, "Equivalent format 'Nov 30, 2026' must pass without false positive");
+
+    // Equivalent Format E: "30 November 2026" (Day-first natural language)
+    const replyDayFirst = `Here is your study plan details for "adaptive-demo":
+- Exam Date: 30 November 2026
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkDayFirst = verifyFinalAnswerConsistency(replyDayFirst, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkDayFirst.valid, true, "Equivalent format '30 November 2026' must pass without false positive");
+
+    console.log("✓ Regression tests PASSED for equivalent date formats: 2026-11-30, November 30, 2026, November 30th, 2026, Nov 30, 2026, 30 November 2026");
+
+    // 12.5 Negative tests: Genuinely incorrect exam date
+    const replyWrongDateNatural = `Here is your study plan details for "adaptive-demo":
+- Exam Date: December 25, 2026
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkWrongDateNatural = verifyFinalAnswerConsistency(replyWrongDateNatural, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkWrongDateNatural.valid, false, "Genuinely incorrect date 'December 25, 2026' must be rejected");
+    assert.equal(checkWrongDateNatural.reason, 'Final reply omitted or contradicted exam date "2026-11-30".');
+    console.log("✓ Negative test PASSED: Genuinely incorrect date 'December 25, 2026' correctly flagged");
+
+    const replyWrongDateIso = `Here is your study plan details for "adaptive-demo":
+- Exam Date: 2026-12-15
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkWrongDateIso = verifyFinalAnswerConsistency(replyWrongDateIso, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkWrongDateIso.valid, false, "Genuinely incorrect ISO date '2026-12-15' must be rejected");
+    assert.equal(checkWrongDateIso.reason, 'Final reply omitted or contradicted exam date "2026-11-30".');
+    console.log("✓ Negative test PASSED: Genuinely incorrect ISO date '2026-12-15' correctly flagged");
+
+    // 12.6 Negative tests: Omitted exam date
+    const replyOmittedDate = `Here is your study plan details for "adaptive-demo":
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- 2 recorded study sessions.`;
+    const checkOmittedDate = verifyFinalAnswerConsistency(replyOmittedDate, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkOmittedDate.valid, false, "Omission of exam date must be rejected");
+    assert.equal(checkOmittedDate.reason, 'Final reply omitted or contradicted exam date "2026-11-30".');
+    console.log("✓ Negative test PASSED: Omitted exam date correctly flagged");
+
+    // 12.7 Negative tests: Contradictory stated exam date when another date exists in text
+    const replyContradictoryWithOtherDate = `Here is your study plan details for "adaptive-demo":
+- Exam Date: December 25, 2026
+- Daily Available Study Time: 3 hours/day
+- Subjects: Mathematics (high priority), Physics (medium priority), Chemistry (low priority)
+- A study session was recorded on 2026-11-30.`;
+    const checkContradictoryWithOtherDate = verifyFinalAnswerConsistency(replyContradictoryWithOtherDate, mockRetrievalTools, userRetrievalMessage);
+    assert.equal(checkContradictoryWithOtherDate.valid, false, "Stated exam date of 2026-12-25 contradicting target 2026-11-30 must be rejected even if 2026-11-30 appears elsewhere");
+    assert.equal(checkContradictoryWithOtherDate.reason, 'Final reply omitted or contradicted exam date "2026-11-30".');
+    console.log("✓ Negative test PASSED: Explicit contradiction with secondary session date correctly flagged");
+
+    // 12.8 Consistency verification without userMessage (Section 2 tool verification fallback)
+    const checkSection2Equivalent = verifyFinalAnswerConsistency(replyNaturalFull, mockRetrievalTools);
+    assert.equal(checkSection2Equivalent.valid, true, "Section 2 fallback must accept equivalent format 'November 30, 2026'");
+
+    const checkSection2Wrong = verifyFinalAnswerConsistency(replyWrongDateNatural, mockRetrievalTools);
+    assert.equal(checkSection2Wrong.valid, false, "Section 2 fallback must reject wrong exam date");
+    assert.equal(checkSection2Wrong.reason, 'Final reply omitted or contradicted exam date "2026-11-30".');
+    console.log("✓ Section 2 tool consistency fallback verified for equivalent and contradictory dates");
 
     await mcpManager.disconnect();
 
