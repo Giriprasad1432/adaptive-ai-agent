@@ -11,6 +11,7 @@ import {
     stripMetaPreamble,
     detectPlanWideTotalRemainingHoursContradiction,
     detectBlanketRecentSessionDateContradiction,
+    detectIncorrectSubjectInformation,
     isExamDateRequested,
     formatGroundedPlanSummary,
     formatGroundedAdaptationSummary,
@@ -2347,6 +2348,204 @@ The most recent sessions were all completed on October 12, 2026.
     assert.ok(checkWrongHoursNoExamDate.correctedReply.includes("119h remaining"), "Corrected reply must provide grounded total of 119h remaining");
 
     console.log("✓ Exam-date consistency check verified: false positive eliminated, explicit requests enforced, contradictions caught");
+
+    // =========================================================================
+    // SECTION 19: Subject Consistency False-Positive Elimination & Precision Suite
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 19: Subject Consistency False-Positive Elimination ---");
+    console.log("=======================================================");
+
+    const mockPlanForSection19 = {
+        planId: "default",
+        examDate: "2026-11-30",
+        daysRemaining: 49,
+        dailyAvailableHours: 3,
+        totalCompletedHours: 28,
+        totalMissedHours: 0,
+        totalRemainingHours: 119,
+        totalAllocatedHours: 147,
+        totalAvailableHours: 147,
+        overallProgress: "19%",
+        subjects: {
+            Mathematics: { allocatedHours: 88.2, completedHours: 28, remainingHours: 60.2, missedHours: 0, priority: "high", progressPercentage: 32 },
+            Physics: { allocatedHours: 58.8, completedHours: 0, remainingHours: 58.8, missedHours: 0, priority: "medium", progressPercentage: 0 }
+        },
+        totalSessionsRecorded: 1,
+        recentSessions: [
+            { id: "s1", date: "2026-10-12", subject: "Mathematics", hoursSpent: 2, status: "completed" }
+        ]
+    };
+    const executedSection19Tools = [{
+        toolName: "get_study_plan",
+        toolArgs: { planId: "default" },
+        isError: false,
+        content: JSON.stringify(mockPlanForSection19),
+        parsedData: mockPlanForSection19
+    }];
+
+    // 19.1 Concise progress summary without the exam date or subject-by-subject breakdown (Reproduction fix)
+    const conciseProgressPrompt = "Briefly tell me how my study plan is progressing. Keep it concise. Use planId default.";
+    const conciseProgressReply = "You are making steady progress on your study plan with 28 completed hours out of 147 total hours, leaving 119 remaining hours.";
+    const checkConciseProgress = verifyFinalAnswerConsistency(conciseProgressReply, executedSection19Tools, conciseProgressPrompt);
+    assert.equal(checkConciseProgress.valid, true, "Concise progress summary without exam date or subject breakdown must pass consistency check without false positive");
+
+    // 19.2 Exam-date-only request returning the correct date without a full-plan dump
+    const examDateOnlyPrompt = "What is my exam date for plan default?";
+    const examDateOnlyReply = "Your exam date for plan default is November 30, 2026.";
+    const checkExamDateOnly = verifyFinalAnswerConsistency(examDateOnlyReply, executedSection19Tools, examDateOnlyPrompt);
+    assert.equal(checkExamDateOnly.valid, true, "Exam-date-only request with correct exam date must pass without requiring subjects or dumping the full plan");
+
+    // 19.3 Explicit exam-date request where the response omits the date
+    const omittedDateReply = "Your study plan has 119 remaining hours across all subjects.";
+    const checkOmittedDateOnRequest = verifyFinalAnswerConsistency(omittedDateReply, executedSection19Tools, examDateOnlyPrompt);
+    assert.equal(checkOmittedDateOnRequest.valid, false, "Response omitting explicitly requested exam date must fail consistency check");
+    assert.ok(checkOmittedDateOnRequest.reason.includes("exam date"), "Reason must identify omitted exam date");
+    assert.ok(checkOmittedDateOnRequest.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date");
+
+    // 19.4 Incorrect exam date in a response
+    const wrongDateReply = "Your exam is scheduled for December 25, 2026.";
+    const checkWrongDate = verifyFinalAnswerConsistency(wrongDateReply, executedSection19Tools, conciseProgressPrompt);
+    assert.equal(checkWrongDate.valid, false, "Response with contradictory exam date must fail consistency check");
+    assert.ok(checkWrongDate.reason.includes("exam date"), "Reason must cite exam date contradiction");
+    assert.ok(checkWrongDate.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date");
+
+    // 19.5 Incorrect subject information in a response
+    // 19.5a Contradictory subject priority
+    const wrongSubjectPriorityReply = "You are progressing well with 28 completed hours. Mathematics is low priority.";
+    const checkWrongPriority = verifyFinalAnswerConsistency(wrongSubjectPriorityReply, executedSection19Tools, conciseProgressPrompt);
+    assert.equal(checkWrongPriority.valid, false, "Response asserting contradictory subject priority must fail consistency check");
+    assert.ok(checkWrongPriority.reason.includes("Mathematics"), "Reason must cite conflicting subject");
+    assert.ok(checkWrongPriority.reason.includes("priority"), "Reason must cite priority contradiction");
+    assert.ok(checkWrongPriority.correctedReply.includes("HIGH Priority"), "Corrected reply must restore verified priority");
+
+    // 19.5b Fabricated / Nonexistent subject claimed in study plan
+    const fabricatedSubjectReply = "You are progressing well. Your plan includes History (high priority) with 30 hours.";
+    const checkFabricatedSubject = verifyFinalAnswerConsistency(fabricatedSubjectReply, executedSection19Tools, conciseProgressPrompt);
+    assert.equal(checkFabricatedSubject.valid, false, "Response claiming a nonexistent subject must fail consistency check");
+    assert.ok(checkFabricatedSubject.reason.includes("History"), "Reason must identify fabricated subject");
+
+    // 19.5c Contradictory subject remaining hours
+    const wrongSubjectHoursReply = "Mathematics: 20 hours remaining; Physics: 58.8 hours remaining.";
+    const checkWrongSubjectHours = verifyFinalAnswerConsistency(wrongSubjectHoursReply, executedSection19Tools, "Show me my subjects");
+    assert.equal(checkWrongSubjectHours.valid, false, "Response asserting contradictory remaining hours for a subject must fail");
+    assert.ok(checkWrongSubjectHours.reason.includes("Mathematics"), "Reason must cite Mathematics");
+    assert.ok(checkWrongSubjectHours.reason.includes("remaining hours"), "Reason must cite remaining hours contradiction");
+
+    // 19.6 Full-plan request that must preserve the required subject breakdown
+    const fullPlanPrompt = "Retrieve study plan default. Report all subjects.";
+    const omittedSubjectInFullPlanReply = "Here is your study plan: Physics (medium priority): 58.8 hours remaining.";
+    const checkOmittedSubjectInFullPlan = verifyFinalAnswerConsistency(omittedSubjectInFullPlanReply, executedSection19Tools, fullPlanPrompt);
+    assert.equal(checkOmittedSubjectInFullPlan.valid, false, "Full plan request omitting a required subject must fail consistency check");
+    assert.equal(checkOmittedSubjectInFullPlan.reason, 'Final reply omitted subject "Mathematics" from retrieved plan.');
+    assert.ok(checkOmittedSubjectInFullPlan.correctedReply.includes("Mathematics"), "Corrected reply must provide full grounded summary");
+
+    // 19.7 Both retrieval and get_study_plan tool intents where applicable
+    // 19.7a Latest successful tool get_study_plan fallback path (without userMessage trigger)
+    const checkToolOnlyConcise = verifyFinalAnswerConsistency(conciseProgressReply, executedSection19Tools, "Brief progress update");
+    assert.equal(checkToolOnlyConcise.valid, true, "get_study_plan tool check with brief progress update must pass");
+
+    // 19.7b End-to-end agent execution preserving concise progress reply without full plan dump
+    const conciseAgentProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            if (this.callCount === 1) {
+                return {
+                    toolCalls: [{ name: "get_study_plan", arguments: { planId: "default" } }],
+                    content: ""
+                };
+            }
+            return {
+                toolCalls: [],
+                content: conciseProgressReply
+            };
+        }
+    };
+    const mockMcpForSection19 = {
+        listTools: () => [{ name: "get_study_plan", inputSchema: { type: "object", properties: { planId: { type: "string" } } } }],
+        callTool: async () => ({ isError: false, content: JSON.stringify(mockPlanForSection19) })
+    };
+    const conciseAgent = new AdaptiveAgent({
+        provider: conciseAgentProvider,
+        mcpClient: mockMcpForSection19,
+        maxRounds: 3
+    });
+    const conciseAgentRes = await conciseAgent.run({ message: conciseProgressPrompt });
+    assert.equal(conciseAgentRes.success, true, "Agent run must succeed");
+    assert.equal(conciseAgentRes.reply, conciseProgressReply, "Concise answer must be preserved directly without full plan dump replacement");
+    assert.ok(!conciseAgentRes.steps.some(s => s.type === "final_answer_grounded"), "Agent must NOT trigger final_answer_grounded for concise progress reply");
+
+    // 19.8 Mixed-intent subject breakdown requests vs concise and single-subject requests
+    const mixedBreakdownPrompt = "Show my progress and the full subject-wise breakdown";
+    const subBySubPrompt = "Show my progress with a subject-by-subject breakdown";
+    const planSubjectList = ["Mathematics", "Physics"];
+
+    // 19.8a Explicit requests for subject breakdown must require all subjects
+    assert.deepEqual(
+        getRequiredSubjects(planSubjectList, mixedBreakdownPrompt),
+        planSubjectList,
+        "Request with 'full subject-wise breakdown' must require all subjects despite containing 'progress'"
+    );
+    assert.deepEqual(
+        getRequiredSubjects(planSubjectList, subBySubPrompt),
+        planSubjectList,
+        "Request with 'subject-by-subject breakdown' must require all subjects"
+    );
+
+    // 19.8b Concise progress requests must not require every subject
+    assert.deepEqual(
+        getRequiredSubjects(planSubjectList, "Briefly summarize my progress"),
+        [],
+        "Concise progress request must not require any individual subjects"
+    );
+
+    // 19.8c Requests for one named subject must only require that subject
+    assert.deepEqual(
+        getRequiredSubjects(planSubjectList, "Show Mathematics progress only"),
+        ["Mathematics"],
+        "Request specifying Mathematics only must not require unrelated subjects"
+    );
+
+    // 19.8d Omitting a subject from a subject-wise breakdown response must fail consistency check
+    const partialBreakdownReply = "Here is your progress: Mathematics (high priority): 60.2 hours remaining.";
+    const checkPartialBreakdown = verifyFinalAnswerConsistency(partialBreakdownReply, executedSection19Tools, mixedBreakdownPrompt);
+    assert.equal(checkPartialBreakdown.valid, false, "Subject-wise breakdown reply omitting Physics must fail consistency check");
+    assert.equal(checkPartialBreakdown.reason, 'Final reply omitted subject "Physics" from retrieved plan.');
+
+    // 19.9 Multi-claim single-line cross-sentence subject information matching
+    // 19.9a Multi-claim on one line with correct data across sentences must pass without false cross-sentence contradictions
+    const multiClaimCorrectPriority = "Mathematics is high priority. Physics has medium priority.";
+    const checkMultiPriority = detectIncorrectSubjectInformation(multiClaimCorrectPriority, mockPlanForSection19.subjects);
+    assert.equal(checkMultiPriority.contradicted, false, "Multi-claim single-line correct priorities must not trigger cross-sentence contradiction");
+
+    const multiClaimCorrectHours = "Mathematics has 60.2 hours remaining. Physics has 58.8 hours remaining.";
+    const checkMultiHours = detectIncorrectSubjectInformation(multiClaimCorrectHours, mockPlanForSection19.subjects);
+    assert.equal(checkMultiHours.contradicted, false, "Multi-claim single-line correct remaining hours must not trigger cross-sentence contradiction");
+
+    // 19.9b Multi-claim on one line with genuine incorrect priority must be caught for the specific failing subject
+    const multiClaimWrongMathPriority = "Mathematics is low priority. Physics has medium priority.";
+    const checkWrongMathPriority = detectIncorrectSubjectInformation(multiClaimWrongMathPriority, mockPlanForSection19.subjects);
+    assert.equal(checkWrongMathPriority.contradicted, true, "Must catch incorrect Mathematics priority on multi-claim line");
+    assert.equal(checkWrongMathPriority.subject, "Mathematics", "Contradicted subject must be Mathematics");
+
+    const multiClaimWrongPhysicsPriority = "Mathematics is high priority. Physics has high priority.";
+    const checkWrongPhysicsPriority = detectIncorrectSubjectInformation(multiClaimWrongPhysicsPriority, mockPlanForSection19.subjects);
+    assert.equal(checkWrongPhysicsPriority.contradicted, true, "Must catch incorrect Physics priority on multi-claim line");
+    assert.equal(checkWrongPhysicsPriority.subject, "Physics", "Contradicted subject must be Physics");
+
+    // 19.9c Multi-claim on one line with genuine incorrect remaining hours must be caught for the specific failing subject
+    const multiClaimWrongMathHours = "Mathematics has 20 hours remaining. Physics has 58.8 hours remaining.";
+    const checkWrongMathHours = detectIncorrectSubjectInformation(multiClaimWrongMathHours, mockPlanForSection19.subjects);
+    assert.equal(checkWrongMathHours.contradicted, true, "Must catch incorrect Mathematics remaining hours on multi-claim line");
+    assert.equal(checkWrongMathHours.subject, "Mathematics", "Contradicted subject must be Mathematics");
+
+    const multiClaimWrongPhysicsHours = "Mathematics has 60.2 hours remaining. Physics has 99 hours remaining.";
+    const checkWrongPhysicsHours = detectIncorrectSubjectInformation(multiClaimWrongPhysicsHours, mockPlanForSection19.subjects);
+    assert.equal(checkWrongPhysicsHours.contradicted, true, "Must catch incorrect Physics remaining hours on multi-claim line");
+    assert.equal(checkWrongPhysicsHours.subject, "Physics", "Contradicted subject must be Physics");
+
+    console.log("✓ Section 19 verified: concise progress & exam-date false positives eliminated, strict validation preserved for conflicting dates/subjects, full-plan subject breakdowns enforced");
 
     console.log("\n===============================================================================");
     console.log("ALL NORMALIZATION, VALIDATION, MCP & E2E AGENT TESTS PASSED! (100%)");

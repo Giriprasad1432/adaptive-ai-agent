@@ -343,8 +343,11 @@ export function replyMentionsSubject(text, subject) {
 
 /**
  * Determines which subjects are required in the reply based on user message and plan subjects.
- * For focused retrieval questions (e.g. user asks only about "Chemistry"), only the mentioned
- * subject(s) are required unless the user asks for all subjects or full plan.
+ * - If user explicitly asks for all subjects or full plan, all plan subjects are required.
+ * - If user explicitly asks for specific subject(s) (e.g. "Chemistry"), only the mentioned subject(s) are required.
+ * - If user asks a concise, progress-only, exam-date-only, or narrow query without requesting all subjects or subject details,
+ *   individual subjects are not required.
+ * - For general unconstrained plan retrieval requests (or when userMessage is omitted), all plan subjects are required.
  * @param {string[]} subjectsInPlan
  * @param {string} [userMessage=""]
  * @returns {string[]}
@@ -354,11 +357,117 @@ export function getRequiredSubjects(subjectsInPlan = [], userMessage = "") {
         return subjectsInPlan;
     }
     const userMentionedSubjects = subjectsInPlan.filter(sub => replyMentionsSubject(userMessage, sub));
-    const asksForAllSubjects = /\b(?:all\s+subjects|every\s+subject|all\s+(?:of\s+)?my\s+subjects|full\s+plan|entire\s+plan|whole\s+plan)\b/i.test(userMessage);
-    if (!asksForAllSubjects && userMentionedSubjects.length > 0) {
+    const asksForAllSubjects = /\b(?:all\s+subjects|every\s+subject|each\s+subject|all\s+(?:of\s+)?my\s+subjects|subject(?:-wise|-by-subject|\s+by\s+subject)?\s+breakdown|breakdown\s+of\s+subjects|full\s+plan|entire\s+plan|whole\s+plan|complete\s+plan|report\s+every\s+subject|report\s+all\s+subjects|list\s+(?:all\s+)?subjects|all\s+courses|all\s+topics)\b/i.test(userMessage);
+
+    if (asksForAllSubjects) {
+        return subjectsInPlan;
+    }
+
+    if (userMentionedSubjects.length > 0) {
         return userMentionedSubjects;
     }
+
+    // Check if user specifically requested a concise summary, progress update, exam date, or hours
+    // where individual subject-by-subject breakdowns were not requested.
+    const isNarrowOrConciseQuery = /\b(?:concise|briefly|brief|short|quick|simple|progress|progressing|status|how\s+(?:am\s+i|is\s+it|is\s+my\s+plan)\s+(?:doing|going)|exam\s+date|when\s+(?:is|'s)\s+(?:the\s+|my\s+)?exam|date\s+of\s+(?:the\s+)?exam|remaining\s+hours|hours\s+remaining|how\s+many\s+hours|time\s+remaining|total\s+hours|total\s+remaining|available\s+hours|daily\s+(?:availability|hours)|sessions?)\b/i.test(userMessage);
+    if (isNarrowOrConciseQuery) {
+        return [];
+    }
+
     return subjectsInPlan;
+}
+
+/**
+ * Detects whether the reply explicitly asserts incorrect or contradictory subject information,
+ * such as conflicting subject priority, conflicting remaining hours, or claiming a subject that
+ * is not part of the verified study plan.
+ * @param {string} reply - Final reply text
+ * @param {Object} subjects - data.subjects from verified tool result
+ * @returns {{ contradicted: boolean, subject?: string, details?: string }}
+ */
+export function detectIncorrectSubjectInformation(reply, subjects = {}) {
+    if (typeof reply !== "string" || !subjects || typeof subjects !== "object") {
+        return { contradicted: false };
+    }
+    const validSubjectNames = Object.keys(subjects);
+    if (validSubjectNames.length === 0) return { contradicted: false };
+
+    // 1. Contradictory subject priority
+    for (const [sub, info] of Object.entries(subjects)) {
+        if (!info || typeof info !== "object") continue;
+        const actualPrio = (info.priority || "").toLowerCase().trim();
+        if (!actualPrio) continue;
+
+        const escapedSub = escapeRegex(sub);
+        const subAliasPattern = /^math(?:ematics)?$/i.test(sub) ? "(?:mathematics|maths?)" : escapedSub;
+
+        // Check for stated priority after subject: e.g. "Mathematics is low priority", "Mathematics (LOW Priority)", "Mathematics: low priority"
+        // Boundaries prevent matching across sentence-terminating punctuation (. ! ?), commas, closing parentheses, or newlines in lists
+        const afterRegex = new RegExp(`\\b${subAliasPattern}\\b[^\\n.,;!?)]*?(?:\\(|is|has|with|:|-)?\\s*\\b(high|medium|low)\\s+priority\\b`, "gi");
+        let m;
+        while ((m = afterRegex.exec(reply)) !== null) {
+            const claimed = m[1].toLowerCase();
+            if (claimed !== actualPrio) {
+                return {
+                    contradicted: true,
+                    subject: sub,
+                    details: `Final reply states "${sub}" has "${claimed} priority", contradicting verified priority "${actualPrio}".`
+                };
+            }
+        }
+
+        // Check for stated priority before subject: e.g. "low priority Mathematics", "low-priority Mathematics", "low priority in Mathematics"
+        const beforeRegex = new RegExp(`\\b(high|medium|low)[\\s-]priority\\s+(?:in\\s+|for\\s+)?\\b${subAliasPattern}\\b`, "gi");
+        let bm;
+        while ((bm = beforeRegex.exec(reply)) !== null) {
+            const claimed = bm[1].toLowerCase();
+            if (claimed !== actualPrio) {
+                return {
+                    contradicted: true,
+                    subject: sub,
+                    details: `Final reply states "${sub}" has "${claimed} priority", contradicting verified priority "${actualPrio}".`
+                };
+            }
+        }
+
+        // 2. Contradictory subject remaining hours
+        if (typeof info.remainingHours === "number" && !isNaN(info.remainingHours)) {
+            const subHoursRegex = new RegExp(`\\b${subAliasPattern}\\b[^\\n.,;!?)]*?[:\\-–]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:hours?|hrs?|h)?\\s*(?:remaining|left)`, "gi");
+            let hm;
+            while ((hm = subHoursRegex.exec(reply)) !== null) {
+                const claimedH = parseFloat(hm[1]);
+                if (!isNaN(claimedH) && Math.abs(claimedH - info.remainingHours) > 0.2) {
+                    return {
+                        contradicted: true,
+                        subject: sub,
+                        details: `Final reply states "${sub}" remaining hours as ${claimedH}h, contradicting verified ${info.remainingHours}h remaining.`
+                    };
+                }
+            }
+        }
+    }
+
+    // 3. Fabricated / Non-existent subjects claimed as plan subjects
+    const knownSubjectCandidates = [
+        "Mathematics", "Physics", "Chemistry", "Biology", "History", "Geography",
+        "Literature", "English", "Computer Science", "Art", "Economics", "Psychology"
+    ];
+    for (const cand of knownSubjectCandidates) {
+        const isInPlan = validSubjectNames.some(s => replyMentionsSubject(cand, s) || replyMentionsSubject(s, cand));
+        if (!isInPlan) {
+            const escapedCand = escapeRegex(cand);
+            const candPattern = new RegExp(`(?:[-*•]\\s*\\*\\*${escapedCand}\\*\\*|\\b${escapedCand}\\s*\\([^)]*priority|\\b${escapedCand}\\s*[:\\-–]\\s*\\d+(?:\\.\\d+)?\\s*(?:hours?|hrs?|h))`, "i");
+            if (candPattern.test(reply)) {
+                return {
+                    contradicted: true,
+                    subject: cand,
+                    details: `Final reply claims subject "${cand}" is in the study plan, but "${cand}" is not in the verified plan subjects (${validSubjectNames.join(", ")}).`
+                };
+            }
+        }
+    }
+
+    return { contradicted: false };
 }
 
 /**
@@ -831,12 +940,17 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
         const hasSessions = (Array.isArray(data.recentSessions) && data.recentSessions.length > 0) || (data.totalSessionsRecorded > 0) || (Array.isArray(data.sessions) && data.sessions.length > 0);
         const falselyClaimsNoSessions = hasSessions && /\b(?:no\s+sessions?|0\s+sessions?|not\s+recorded\s+any)\b/i.test(finalReply);
 
-        if (missingSubject || examDateContradiction || examDateOmission || falselyClaimsNoSessions) {
-            const reason = missingSubject
-                ? `Final reply omitted subject "${missingSubject}" from retrieved plan.`
-                : (examDateContradiction || examDateOmission
-                    ? `Final reply omitted or contradicted exam date "${data.examDate}".`
-                    : `Final reply falsely claimed no sessions exist when sessions are recorded.`);
+        // Check if reply asserts contradictory or incorrect subject information
+        const subjectContradiction = detectIncorrectSubjectInformation(finalReply, data.subjects);
+
+        if (subjectContradiction.contradicted || missingSubject || examDateContradiction || examDateOmission || falselyClaimsNoSessions) {
+            const reason = subjectContradiction.contradicted
+                ? subjectContradiction.details
+                : (missingSubject
+                    ? `Final reply omitted subject "${missingSubject}" from retrieved plan.`
+                    : (examDateContradiction || examDateOmission
+                        ? `Final reply omitted or contradicted exam date "${data.examDate}".`
+                        : `Final reply falsely claimed no sessions exist when sessions are recorded.`));
             return {
                 valid: false,
                 reason,
@@ -875,7 +989,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
             { req: /missed\s+hours/i, field: "missed hours", test: () => /missed/i.test(finalReply) },
             { req: /(?:daily\s+availability|daily\s+hours|available\s+hours)/i, field: "daily availability", test: () => /(?:daily|availability)/i.test(finalReply) },
             { req: /(?:recorded\s+(?:study\s+)?sessions?|sessions?)/i, field: "recorded sessions", test: () => /session/i.test(finalReply) },
-            { req: /(?:overall\s+progress|progress)/i, field: "overall progress", test: () => /progress/i.test(finalReply) }
+            { req: /(?:overall\s+progress|progress)/i, field: "overall progress", test: () => /(?:progress|completed|finished|%|ahead|behind|on\s+track|pace)/i.test(finalReply) }
         ];
 
         for (const c of fieldChecks) {
@@ -902,6 +1016,14 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
         const subjects = Object.keys(parsedData.subjects || {});
         const requiredSubjects = getRequiredSubjects(subjects, userMessage);
         const missingSub = requiredSubjects.find(sub => !replyMentionsSubject(finalReply, sub));
+        const subjectContradiction = detectIncorrectSubjectInformation(finalReply, parsedData.subjects);
+        if (subjectContradiction.contradicted) {
+            return {
+                valid: false,
+                reason: subjectContradiction.details,
+                correctedReply: formatGroundedRetrievalSummary(parsedData)
+            };
+        }
         if (missingSub) {
             return {
                 valid: false,
