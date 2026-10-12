@@ -299,24 +299,79 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
         }
     }
 
-    // Verification for get_study_plan and adapt_study_plan
-    if (toolName === "get_study_plan" || toolName === "adapt_study_plan") {
-        if (data && typeof data === "object") {
-            const subjects = data.subjects || data.adjustedSubjectAllocations || {};
-            const subjectNames = Object.keys(subjects);
-            const malformed = subjectNames.filter(name =>
-                /^["'\\\[\]]|["'\\\[\]]$/.test(name) ||
-                name.includes('"') ||
-                name.includes("\\") ||
-                name.includes("[") ||
-                name.includes("]")
-            );
-            if (malformed.length > 0) {
+    // Verification for record_study_session
+    if (toolName === "record_study_session") {
+        if (!data || typeof data !== "object") {
+            return {
+                valid: false,
+                error: "record_study_session did not return a valid structured result."
+            };
+        }
+        if (!data.session || typeof data.session !== "object") {
+            return {
+                valid: false,
+                error: "record_study_session result is missing recorded session details."
+            };
+        }
+        if (!data.subjectProgress || typeof data.subjectProgress !== "object") {
+            return {
+                valid: false,
+                error: "record_study_session result is missing updated subject progress."
+            };
+        }
+        // Verify recorded subject matches requested subject
+        if (toolArgs.subject && data.session.subject) {
+            const expectedSub = toolArgs.subject.trim().toLowerCase();
+            const actualSub = String(data.session.subject).trim().toLowerCase();
+            if (expectedSub !== actualSub) {
                 return {
                     valid: false,
-                    error: `Retrieved study plan contains malformed subject names: [${malformed.join(", ")}].`
+                    error: `Recorded session subject mismatch: requested "${toolArgs.subject}", recorded "${data.session.subject}".`
                 };
             }
+        }
+        // Verify recorded status matches requested status
+        if (toolArgs.status && data.session.status) {
+            if (toolArgs.status.toLowerCase() !== String(data.session.status).toLowerCase()) {
+                return {
+                    valid: false,
+                    error: `Recorded session status mismatch: requested "${toolArgs.status}", recorded "${data.session.status}".`
+                };
+            }
+        }
+    }
+
+    // Verification for get_study_plan and adapt_study_plan
+    if (toolName === "get_study_plan" || toolName === "adapt_study_plan") {
+        if (!data || typeof data !== "object") {
+            return {
+                valid: false,
+                error: `${toolName} did not return a valid structured summary.`
+            };
+        }
+
+        const subjects = data.subjects || data.adjustedSubjectAllocations || {};
+        const subjectNames = Object.keys(subjects);
+
+        if (toolName === "adapt_study_plan" && subjectNames.length === 0) {
+            return {
+                valid: false,
+                error: "adapt_study_plan result is missing adjusted subject allocations."
+            };
+        }
+
+        const malformed = subjectNames.filter(name =>
+            /^["'\\\[\]]|["'\\\[\]]$/.test(name) ||
+            name.includes('"') ||
+            name.includes("\\") ||
+            name.includes("[") ||
+            name.includes("]")
+        );
+        if (malformed.length > 0) {
+            return {
+                valid: false,
+                error: `${toolName} contains malformed subject names: [${malformed.join(", ")}].`
+            };
         }
     }
 

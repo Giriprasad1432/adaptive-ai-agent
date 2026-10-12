@@ -1,4 +1,4 @@
-import { isRetrievalIntent } from "./normalizer.js";
+import { isRetrievalIntent, isSessionRecordingIntent, isAdaptationIntent } from "./normalizer.js";
 
 const MONTH_NAMES = {
     january: 1, jan: 1,
@@ -479,22 +479,80 @@ export function formatGroundedPlanSummary(planData) {
 }
 
 /**
+ * Formats a clean, grounded confirmation summary directly from a verified record_study_session result.
+ * Reports session details (subject, status, hours, date, notes) and updated metrics
+ * (completed hours, remaining hours, missed hours, subject progress, and overall plan progress).
+ * @param {Object} sessionData
+ * @param {Object} [toolArgs]
+ * @returns {string}
+ */
+export function formatGroundedSessionSummary(sessionData, toolArgs = {}) {
+    if (!sessionData || typeof sessionData !== "object") return "";
+
+    const session = sessionData.session || {};
+    const subjectProgress = sessionData.subjectProgress || {};
+    const subject = subjectProgress.subject || session.subject || toolArgs?.subject || "Unknown";
+    const status = (session.status || toolArgs?.status || "completed").toLowerCase();
+    const formattedStatus = status.charAt(0).toUpperCase() + status.slice(1);
+    const hoursSpent = session.hoursSpent !== undefined ? session.hoursSpent : (toolArgs?.hoursSpent ?? 0);
+    const date = session.date || toolArgs?.date || "today";
+
+    const completedHours = subjectProgress.completedHours !== undefined ? subjectProgress.completedHours : "N/A";
+    const remainingHours = subjectProgress.remainingHours !== undefined ? subjectProgress.remainingHours : "N/A";
+    const missedHours = subjectProgress.missedHours !== undefined ? subjectProgress.missedHours : 0;
+    const progressPct = subjectProgress.progressPercentage || (subjectProgress.progress ? `${subjectProgress.progress}` : "N/A");
+    const overallProgress = sessionData.overallPlanProgress || sessionData.overallProgress || "N/A";
+
+    const lines = [
+        `Study session recorded successfully!`,
+        "",
+        `**Session Details:**`,
+        `- **Subject:** ${subject}`,
+        `- **Status:** ${formattedStatus}`,
+        `- **Hours Spent:** ${hoursSpent} hour${hoursSpent === 1 ? "" : "s"}`,
+        `- **Date:** ${date}`
+    ];
+
+    if (session.notes) {
+        lines.push(`- **Notes:** ${session.notes}`);
+    }
+
+    lines.push(
+        "",
+        `**Updated Progress for ${subject}:**`,
+        `- **Completed Hours:** ${completedHours}h`,
+        `- **Remaining Hours:** ${remainingHours}h`,
+        `- **Missed Hours:** ${missedHours}h`,
+        `- **Subject Progress:** ${progressPct}`,
+        `- **Overall Plan Progress:** ${overallProgress}`
+    );
+
+    return lines.join("\n");
+}
+
+/**
  * Formats a clean, grounded summary from an adapted study plan result.
  */
 export function formatGroundedAdaptationSummary(adaptData) {
     if (!adaptData || typeof adaptData !== "object") return "";
 
+    const planId = adaptData.planId ? ` "${adaptData.planId}"` : "";
     const reason = adaptData.reason || "Progress adaptation";
-    const daysRemaining = adaptData.daysRemaining || "N/A";
-    const recommendedDaily = adaptData.recommendedDailyHours || "N/A";
-    const subjects = adaptData.adjustedSubjectAllocations || {};
+    const daysRemaining = adaptData.daysRemaining !== undefined ? adaptData.daysRemaining : "N/A";
+    const recommendedDaily = adaptData.recommendedDailyHours !== undefined ? adaptData.recommendedDailyHours : "N/A";
+    const subjects = adaptData.adjustedSubjectAllocations || adaptData.subjects || {};
 
-    const subjectLines = Object.entries(subjects).map(([sub, info]) => 
-        `- **${sub}**: ${info.remainingHours}h remaining (${info.progress || "0%"} progress, ${info.allocatedHours}h total)`
-    );
+    const subjectLines = Object.entries(subjects).map(([sub, info]) => {
+        const remaining = info.remainingHours !== undefined ? `${info.remainingHours}h remaining` : "";
+        const progress = info.progress !== undefined ? `${info.progress} progress` : (info.progressPercentage !== undefined ? `${info.progressPercentage}% progress` : "");
+        const completed = info.completedHours !== undefined ? `${info.completedHours}h completed` : "";
+        const allocated = info.allocatedHours !== undefined ? `${info.allocatedHours}h total allocated` : "";
+        const details = [remaining, progress, completed, allocated].filter(Boolean).join(", ");
+        return `- **${sub}**: ${details ? `(${details})` : "adjusted"}`;
+    });
 
     return [
-        `Study plan adapted successfully!`,
+        `Study plan${planId} adapted successfully!`,
         "",
         `**Adaptation Summary:**`,
         `- **Reason:** ${reason}`,
@@ -585,10 +643,26 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 failure: true
             };
         }
+        if (userMessage && isSessionRecordingIntent(userMessage)) {
+            return {
+                valid: false,
+                reason: 'Session recording request requires successful execution of "record_study_session".',
+                correctedReply: 'Action Failed: The requested study session could not be recorded because "record_study_session" was not executed.',
+                failure: true
+            };
+        }
+        if (userMessage && isAdaptationIntent(userMessage)) {
+            return {
+                valid: false,
+                reason: 'Plan adaptation request requires successful execution of "adapt_study_plan".',
+                correctedReply: 'Action Failed: The requested plan adaptation could not be completed successfully because "adapt_study_plan" was not executed.',
+                failure: true
+            };
+        }
         return { valid: true };
     }
 
-    // 1. Retrieval intent verification
+    // 1. Intent execution integrity checks
     if (userMessage && isRetrievalIntent(userMessage)) {
         const retrievalTool = executedTools.find(t => t.toolName === "get_study_plan" && !t.isError && t.parsedData);
         if (!retrievalTool) {
@@ -708,6 +782,63 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
         }
     }
 
+    // Consistency check for record_study_session
+    if (toolName === "record_study_session" && parsedData) {
+        const session = parsedData.session || {};
+        const subjectProgress = parsedData.subjectProgress || {};
+        const subject = subjectProgress.subject || session.subject || toolArgs?.subject;
+
+        // 1. Must mention the target subject (handling aliases like Math / Maths for Mathematics)
+        if (subject && !replyMentionsSubject(finalReply, subject)) {
+            return {
+                valid: false,
+                reason: `Final reply omitted subject "${subject}" from recorded session confirmation.`,
+                correctedReply: formatGroundedSessionSummary(parsedData, toolArgs)
+            };
+        }
+
+        // 2. Detect generic or unhelpful final responses:
+        // Must mention session/study/completed/missed AND mention hours or progress metrics
+        const mentionsSessionOrAction = /\b(?:session|studied|study|recorded|logged|completed|missed)\b/i.test(finalReply);
+        const mentionsHoursOrProgress = /\b(?:\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)|progress|%)\b/i.test(finalReply);
+
+        if (!mentionsSessionOrAction || !mentionsHoursOrProgress) {
+            return {
+                valid: false,
+                reason: "Final reply was generic or omitted verified session hours and progress metrics.",
+                correctedReply: formatGroundedSessionSummary(parsedData, toolArgs)
+            };
+        }
+
+        // 3. Contradiction checks:
+        // If session was missed, ensure reply does not falsely claim hours were completed
+        const isMissed = session.status === "missed" || toolArgs?.status === "missed";
+        if (isMissed && /\bcompleted\s+\d+\s*(?:hours?|hrs?)/i.test(finalReply) && !/\bmissed\b/i.test(finalReply)) {
+            return {
+                valid: false,
+                reason: "Final reply claimed session was completed when it was recorded as missed.",
+                correctedReply: formatGroundedSessionSummary(parsedData, toolArgs)
+            };
+        }
+
+        // 4. If reply claims hoursSpent contradicting tool result
+        const actualHours = session.hoursSpent !== undefined ? session.hoursSpent : toolArgs?.hoursSpent;
+        if (typeof actualHours === "number" && actualHours > 0) {
+            const hoursClaimRegex = /(?:recorded|completed|studied|logged)\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)/i;
+            const match = finalReply.match(hoursClaimRegex);
+            if (match) {
+                const claimedHours = parseFloat(match[1]);
+                if (Math.abs(claimedHours - actualHours) > 0.05) {
+                    return {
+                        valid: false,
+                        reason: `Final reply claimed ${claimedHours} hours recorded, contradicting tool result of ${actualHours} hours.`,
+                        correctedReply: formatGroundedSessionSummary(parsedData, toolArgs)
+                    };
+                }
+            }
+        }
+    }
+
     // Consistency check for adapt_study_plan
     if (toolName === "adapt_study_plan" && parsedData) {
         const recommendedDaily = Number(parsedData.recommendedDailyHours);
@@ -721,6 +852,18 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                     correctedReply: corrected
                 };
             }
+        }
+
+        // Detect generic final replies that fail to confirm adaptation details
+        const mentionsAdaptation = /\b(?:adapt(?:ed|ation)?|re-?balanc(?:ed|ing)|adjust(?:ed|ment)|reschedul(?:ed|ing)|updat(?:ed|ing)\s+(?:the\s+)?(?:schedule|plan))\b/i.test(finalReply);
+        const mentionsMetricsOrSubjects = /\b(?:\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)|pace|daily|progress|%|remaining)\b/i.test(finalReply);
+
+        if (!mentionsAdaptation || !mentionsMetricsOrSubjects) {
+            return {
+                valid: false,
+                reason: "Final reply was generic or omitted verified plan adaptation details.",
+                correctedReply: formatGroundedAdaptationSummary(parsedData)
+            };
         }
     }
 

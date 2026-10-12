@@ -1,7 +1,7 @@
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
-import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, extractExplicitPlanId } from "./normalizer.js";
+import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, extractExplicitPlanId } from "./normalizer.js";
 import { validateToolArguments, verifyToolResult } from "./validator.js";
-import { verifyFinalAnswerConsistency, formatGroundedPlanSummary, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary } from "./consistencyChecker.js";
+import { verifyFinalAnswerConsistency, formatGroundedPlanSummary, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
 
 export class AdaptiveAgent {
     constructor({ provider, mcpClient, maxRounds, systemPrompt, allowPartialSuccess, toolTimeoutMs } = {}) {
@@ -134,6 +134,8 @@ export class AdaptiveAgent {
                         successSummary = formatGroundedAdaptationSummary(successfulPlan.parsedData);
                     } else if (successfulPlan && successfulPlan.toolName === "get_study_plan") {
                         successSummary = formatGroundedRetrievalSummary(successfulPlan.parsedData);
+                    } else if (successfulPlan && successfulPlan.toolName === "record_study_session") {
+                        successSummary = formatGroundedSessionSummary(successfulPlan.parsedData, successfulPlan.toolArgs);
                     } else {
                         successSummary = turnSuccesses.map(s => `- Tool "${s.toolName}": ${s.content}`).join("\n");
                     }
@@ -164,6 +166,12 @@ export class AdaptiveAgent {
                     } else if (isRetrievalIntent(message)) {
                         completed = false;
                         finalReply = `Action Failed: The requested study plan could not be retrieved because no study plan retrieval was performed.`;
+                    } else if (isSessionRecordingIntent(message)) {
+                        completed = false;
+                        finalReply = `Action Failed: The requested study session could not be recorded because no study session recording was performed.`;
+                    } else if (isAdaptationIntent(message)) {
+                        completed = false;
+                        finalReply = `Action Failed: The requested plan adaptation could not be completed because no study plan adaptation was performed.`;
                     }
                 }
 

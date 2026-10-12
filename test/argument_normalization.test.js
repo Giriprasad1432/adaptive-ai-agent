@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent } from "../src/agent/normalizer.js";
+import { normalizeToolArguments, cleanStringArray, cleanStringItem, cleanObject, parsePythonDictOrRelaxedJson, extractExplicitPlanId, isToolNameLike, shouldOmitAdaptationExamDate, userExplicitlyKeptExamDateUnchanged, isDateAssociatedWithSession, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent } from "../src/agent/normalizer.js";
 import { validateToolArguments, verifyToolResult } from "../src/agent/validator.js";
 import {
     detectDailyScheduleOverrun,
     verifyFinalAnswerConsistency,
+    formatGroundedPlanSummary,
+    formatGroundedAdaptationSummary,
+    formatGroundedRetrievalSummary,
+    formatGroundedSessionSummary,
     normalizeDateToISO,
     isValidCalendarDate,
     extractCanonicalDates,
@@ -1425,7 +1429,274 @@ Adjust as needed for your learning style.`
     assert.equal(checkFullPlanSingleSub.reason, 'Final reply omitted subject "Mathematics" from retrieved plan.');
     console.log("✓ Focused vs. full-plan retrieval correctly distinguished based on user intent");
 
-    await mcpManager.disconnect();
+    // =========================================================================
+    // SECTION 14: Mutation Response Generation, Grounding & Integrity Verification
+    // =========================================================================
+    console.log("\n=======================================================");
+    console.log("--- SECTION 14: Mutation Response Generation & Grounding ---");
+    console.log("=======================================================");
+
+    const mockSessionResultData = {
+        message: 'Study session for "Mathematics" recorded successfully (completed).',
+        session: {
+            id: "session-abc-123",
+            subject: "Mathematics",
+            hoursSpent: 2,
+            status: "completed",
+            date: "2026-10-12",
+            notes: "Calculus practice"
+        },
+        subjectProgress: {
+            subject: "Mathematics",
+            completedHours: 2,
+            missedHours: 0,
+            remainingHours: 10,
+            progressPercentage: "16.7%"
+        },
+        overallPlanProgress: "16.7%"
+    };
+
+    const mockSessionTools = [
+        {
+            toolName: "record_study_session",
+            toolArgs: {
+                planId: "adaptive-demo",
+                subject: "Mathematics",
+                hoursSpent: 2,
+                status: "completed"
+            },
+            isError: false,
+            content: JSON.stringify(mockSessionResultData),
+            parsedData: mockSessionResultData
+        }
+    ];
+
+    // 14.1 formatGroundedSessionSummary formats all required fields accurately
+    const formattedSession = formatGroundedSessionSummary(mockSessionResultData, { subject: "Mathematics" });
+    assert.ok(formattedSession.includes("Study session recorded successfully!"), "Header must confirm success");
+    assert.ok(formattedSession.includes("**Subject:** Mathematics"), "Must include subject");
+    assert.ok(formattedSession.includes("**Status:** Completed"), "Must include status");
+    assert.ok(formattedSession.includes("**Hours Spent:** 2 hours"), "Must include hours spent");
+    assert.ok(formattedSession.includes("**Completed Hours:** 2h"), "Must include completed hours");
+    assert.ok(formattedSession.includes("**Remaining Hours:** 10h"), "Must include remaining hours");
+    assert.ok(formattedSession.includes("**Missed Hours:** 0h"), "Must include missed hours");
+    assert.ok(formattedSession.includes("**Subject Progress:** 16.7%"), "Must include progress percentage");
+    assert.ok(formattedSession.includes("**Overall Plan Progress:** 16.7%"), "Must include overall plan progress");
+    assert.ok(formattedSession.includes("**Notes:** Calculus practice"), "Must include session notes");
+    console.log("✓ formatGroundedSessionSummary verified with all required fields");
+
+    // 14.2 Generic unhelpful final reply after record_study_session is intercepted and grounded
+    const genericSessionReply = "I have processed your Mathematics request.";
+    const checkGenericSession = verifyFinalAnswerConsistency(genericSessionReply, mockSessionTools, "Record that I completed 2 hours of Mathematics for plan adaptive-demo.");
+    assert.equal(checkGenericSession.valid, false, "Generic final reply must be flagged as invalid");
+    assert.equal(checkGenericSession.reason, "Final reply was generic or omitted verified session hours and progress metrics.");
+    assert.ok(checkGenericSession.correctedReply.includes("**Completed Hours:** 2h"), "Corrected reply must contain completed hours");
+    assert.ok(checkGenericSession.correctedReply.includes("**Remaining Hours:** 10h"), "Corrected reply must contain remaining hours");
+    console.log("✓ Generic unhelpful reply after record_study_session intercepted and grounded with verified metrics");
+
+    // 14.3 Reply omitting subject after record_study_session is intercepted
+    const replyOmittedSubject = "Recorded a 2-hour study session with 16.7% progress.";
+    const checkSubjectOmission = verifyFinalAnswerConsistency(replyOmittedSubject, mockSessionTools, "Record that I completed 2 hours of Mathematics.");
+    assert.equal(checkSubjectOmission.valid, false, "Reply omitting subject must be flagged");
+    assert.equal(checkSubjectOmission.reason, 'Final reply omitted subject "Mathematics" from recorded session confirmation.');
+
+    // Completely generic reply omitting both subject and metrics
+    const checkTotallyGeneric = verifyFinalAnswerConsistency("I have processed your request.", mockSessionTools, "Record that I completed 2 hours of Mathematics.");
+    assert.equal(checkTotallyGeneric.valid, false, "Completely generic reply must be flagged");
+    assert.ok(checkTotallyGeneric.correctedReply.includes("**Subject:** Mathematics"), "Grounded summary must supply subject");
+    console.log("✓ Subject omission in recorded session confirmation intercepted");
+
+    // 14.4 Missed session grounded confirmation
+    const mockMissedResultData = {
+        message: 'Study session for "Mathematics" recorded successfully (missed).',
+        session: {
+            id: "session-missed-1",
+            subject: "Mathematics",
+            hoursSpent: 0,
+            status: "missed",
+            date: "2026-10-12",
+            notes: "Missed due to illness"
+        },
+        subjectProgress: {
+            subject: "Mathematics",
+            completedHours: 2,
+            missedHours: 2,
+            remainingHours: 10,
+            progressPercentage: "16.7%"
+        },
+        overallPlanProgress: "16.7%"
+    };
+    const mockMissedTools = [
+        {
+            toolName: "record_study_session",
+            toolArgs: { subject: "Mathematics", hoursSpent: 0, status: "missed" },
+            isError: false,
+            content: JSON.stringify(mockMissedResultData),
+            parsedData: mockMissedResultData
+        }
+    ];
+    const formattedMissed = formatGroundedSessionSummary(mockMissedResultData, { subject: "Mathematics" });
+    assert.ok(formattedMissed.includes("**Status:** Missed"), "Must report Missed status");
+    assert.ok(formattedMissed.includes("**Hours Spent:** 0 hours"), "Must report 0 hours spent");
+    assert.ok(formattedMissed.includes("**Missed Hours:** 2h"), "Must report updated missed hours");
+
+    // Check false completion detection: reply falsely claims missed session was completed
+    const falseCompletedReply = "Successfully completed 2 hours of Mathematics study session.";
+    const checkFalseCompletion = verifyFinalAnswerConsistency(falseCompletedReply, mockMissedTools, "Log missed Mathematics session");
+    assert.equal(checkFalseCompletion.valid, false, "Falsely claiming completed when session was missed must be flagged");
+    assert.equal(checkFalseCompletion.reason, "Final reply claimed session was completed when it was recorded as missed.");
+    console.log("✓ Missed session formatted properly and false-completion contradiction detected");
+
+    // 14.5 Valid detailed reply is preserved without unnecessary overwrite
+    const accurateReply = "Recorded 2 hours for Mathematics. Completed: 2h, Remaining: 10h, Progress: 16.7%.";
+    const checkAccurateReply = verifyFinalAnswerConsistency(accurateReply, mockSessionTools, "Record 2 hours of Mathematics");
+    assert.equal(checkAccurateReply.valid, true, "Already accurate reply must pass without being overwritten");
+
+    // Valid reply using 'Math' alias passes
+    const mathAliasReply = "Logged 2 hours for Math study session. Progress is now 16.7%.";
+    const checkMathAliasSession = verifyFinalAnswerConsistency(mathAliasReply, mockSessionTools, "Record 2 hours of Mathematics");
+    assert.equal(checkMathAliasSession.valid, true, "Accurate reply using Math alias must pass");
+    console.log("✓ Accurate and alias-based session confirmations safely preserved");
+
+    // 14.6 adapt_study_plan grounded confirmation on generic reply
+    const mockAdaptData = {
+        message: "Study plan adapted successfully!",
+        planId: "adaptive-demo",
+        examDate: "2026-11-30",
+        dailyStudyHours: 3,
+        daysRemaining: 49,
+        recommendedDailyHours: 4,
+        capacityWarning: "Recommended daily study exceeds available time",
+        reason: "Missed Mathematics session recovery",
+        adjustedSubjectAllocations: {
+            Mathematics: { priority: "high", allocatedHours: 160, completedHours: 2, remainingHours: 158, progress: "1.3%" },
+            Physics: { priority: "medium", allocatedHours: 106.7, completedHours: 0, remainingHours: 106.7, progress: "0%" }
+        }
+    };
+    const mockAdaptTools = [
+        {
+            toolName: "adapt_study_plan",
+            toolArgs: { planId: "adaptive-demo", reason: "Missed Mathematics session recovery" },
+            isError: false,
+            content: JSON.stringify(mockAdaptData),
+            parsedData: mockAdaptData
+        }
+    ];
+    const genericAdaptReply = "I have adapted your study plan.";
+    const checkGenericAdapt = verifyFinalAnswerConsistency(genericAdaptReply, mockAdaptTools, "Adapt study plan adaptive-demo");
+    assert.equal(checkGenericAdapt.valid, false, "Generic reply after adapt_study_plan must be flagged");
+    assert.equal(checkGenericAdapt.reason, "Final reply was generic or omitted verified plan adaptation details.");
+    assert.ok(checkGenericAdapt.correctedReply.includes("**Recommended Daily Pace:** 4 hours/day"), "Must report recommended daily pace");
+    assert.ok(checkGenericAdapt.correctedReply.includes("Mathematics"), "Must report Mathematics adjustment");
+    assert.ok(checkGenericAdapt.correctedReply.includes("158h remaining"), "Must report remaining hours");
+    assert.ok(checkGenericAdapt.correctedReply.includes("Recommended daily study exceeds available time"), "Must report capacity warning");
+    console.log("✓ Generic reply after adapt_study_plan intercepted and grounded with adaptation details");
+
+    // 14.7 Missing or incomplete tool results caught by verifyToolResult
+    const incompleteSessionNoSession = verifyToolResult("record_study_session", { subject: "Mathematics" }, {
+        isError: false,
+        content: JSON.stringify({ message: "Done" }) // missing session and subjectProgress
+    });
+    assert.equal(incompleteSessionNoSession.valid, false, "Result missing session must fail verification");
+    assert.ok(incompleteSessionNoSession.error.includes("missing recorded session details"));
+
+    const incompleteSessionNoProgress = verifyToolResult("record_study_session", { subject: "Mathematics" }, {
+        isError: false,
+        content: JSON.stringify({ message: "Done", session: { subject: "Mathematics", hoursSpent: 2, status: "completed" } })
+    });
+    assert.equal(incompleteSessionNoProgress.valid, false, "Result missing subjectProgress must fail verification");
+    assert.ok(incompleteSessionNoProgress.error.includes("missing updated subject progress"));
+
+    const subjectMismatchResult = verifyToolResult("record_study_session", { subject: "Mathematics" }, {
+        isError: false,
+        content: JSON.stringify({
+            session: { subject: "Physics", hoursSpent: 2, status: "completed" },
+            subjectProgress: { subject: "Physics", completedHours: 2, remainingHours: 10 }
+        })
+    });
+    assert.equal(subjectMismatchResult.valid, false, "Subject mismatch must fail verification");
+    assert.ok(subjectMismatchResult.error.includes("subject mismatch"));
+
+    const incompleteAdaptResult = verifyToolResult("adapt_study_plan", { planId: "adaptive-demo" }, {
+        isError: false,
+        content: JSON.stringify({ message: "Adapted", adjustedSubjectAllocations: {} })
+    });
+    assert.equal(incompleteAdaptResult.valid, false, "Empty allocations in adapt result must fail verification");
+    console.log("✓ Incomplete or mismatched tool results strictly caught by verifyToolResult");
+
+    // 14.8 False-success prevention: User intent without tool execution
+    const checkNoToolSession = verifyFinalAnswerConsistency("I have recorded your 2 hours of Mathematics.", [], "Record that I completed 2 hours of Mathematics");
+    assert.equal(checkNoToolSession.valid, false, "False success claiming session recorded without executing tool must fail");
+    assert.equal(checkNoToolSession.failure, true, "Must flag failure: true");
+    assert.ok(checkNoToolSession.correctedReply.includes("Action Failed:"), "Corrected reply must report Action Failed");
+
+    const checkNoToolAdapt = verifyFinalAnswerConsistency("I have adapted your study plan schedule.", [], "Adapt study plan adaptive-demo");
+    assert.equal(checkNoToolAdapt.valid, false, "False success claiming adaptation without executing tool must fail");
+    assert.equal(checkNoToolAdapt.failure, true, "Must flag failure: true");
+    assert.ok(checkNoToolAdapt.correctedReply.includes("Action Failed:"), "Corrected reply must report Action Failed");
+    console.log("✓ False-success detection verified for mutation intents without tool execution");
+
+    // 14.9 End-to-end agent execution with live MCP: generic LLM response grounded
+    try {
+        const e2eTestPlanId = `e2e_mutation_${Date.now()}`;
+        const createPlanRes = await mcpManager.callTool("create_study_plan", {
+            planId: e2eTestPlanId,
+            subjects: ["Mathematics", "Physics"],
+            examDate: "2026-11-30",
+            dailyAvailableHours: 3
+        });
+        assert.equal(createPlanRes.isError, false, "E2E test plan creation must succeed");
+
+        const liveGenericSessionProvider = {
+            callCount: 0,
+            async chat() {
+                this.callCount++;
+                if (this.callCount === 1) {
+                    return {
+                        toolCalls: [
+                            {
+                                name: "record_study_session",
+                                arguments: {
+                                    planId: e2eTestPlanId,
+                                    subject: "Mathematics",
+                                    hoursSpent: 2,
+                                    status: "completed"
+                                }
+                            }
+                        ],
+                        content: ""
+                    };
+                }
+                return {
+                    toolCalls: [],
+                    content: "I have processed your request." // Generic unhelpful model response!
+                };
+            }
+        };
+
+        const liveSessionAgent = new AdaptiveAgent({
+            provider: liveGenericSessionProvider,
+            mcpClient: mcpManager,
+            maxRounds: 3
+        });
+
+        const liveAgentResult = await liveSessionAgent.run({
+            message: `Record that I completed a 2-hour study session in Mathematics for plan "${e2eTestPlanId}".`
+        });
+
+        assert.equal(liveAgentResult.success, true, "Agent run must succeed");
+        assert.ok(liveAgentResult.reply.includes("Study session recorded successfully!"), "Reply must be grounded in verified summary");
+        assert.ok(liveAgentResult.reply.includes("**Subject:** Mathematics"), "Reply must confirm Mathematics");
+        assert.ok(liveAgentResult.reply.includes("**Completed Hours:**"), "Reply must report completed hours");
+        assert.ok(liveAgentResult.reply.includes("**Remaining Hours:**"), "Reply must report remaining hours");
+        assert.ok(liveAgentResult.reply.includes("**Overall Plan Progress:**"), "Reply must report overall plan progress");
+        assert.ok(!liveAgentResult.reply.includes("I have processed your request."), "Generic model response must be replaced by grounded summary");
+        const liveMutationGroundedStep = liveAgentResult.steps.find(s => s.type === "final_answer_grounded");
+        assert.ok(liveMutationGroundedStep, "Agent must record final_answer_grounded step in trajectory");
+        console.log("✓ End-to-end live agent test verified: generic model reply replaced by concise grounded confirmation with progress metrics!");
+    } finally {
+        await mcpManager.disconnect();
+    }
 
     console.log("\n===============================================================================");
     console.log("ALL NORMALIZATION, VALIDATION, MCP & E2E AGENT TESTS PASSED! (100%)");

@@ -402,6 +402,31 @@ export function isAdaptationIntent(text) {
 }
 
 /**
+ * Detects if a text represents a study session recording intent
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isSessionRecordingIntent(text) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    const clean = text.trim();
+
+    // Pure retrieval queries such as "show recorded sessions" or "retrieve sessions" are retrieval intents
+    if (isRetrievalIntent(clean) && !/\b(?:record|log|track|mark|enter|add)\b/i.test(clean)) {
+        return false;
+    }
+
+    const sessionPatterns = [
+        /\b(?:record|log|track|mark|enter|add|note)\b.*?\b(?:study\s+session|session|hours?\s+(?:studied|spent)|missed\s+session|completed\s+session)\b/i,
+        /\b(?:recorded|logged)\b.*?\b(?:session|hours?\s+studied)\b/i,
+        /\b(?:completed|missed)\s+(?:\d+(?:\.\d+)?\s*(?:hours?|hrs?)\s+)?(?:study\s+)?session\b/i,
+        /\b(?:record|log)\s+(?:that\s+)?(?:i\s+)?(?:completed|missed|studied|finished)\b/i,
+        /\b(?:studied|spent)\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?)\b.*?\b(?:record|log)\b/i
+    ];
+
+    return sessionPatterns.some(p => p.test(clean));
+}
+
+/**
  * Extracts explicit reason for adjustment provided by user in text
  * @param {string} text
  * @returns {string|null}
