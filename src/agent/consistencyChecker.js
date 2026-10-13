@@ -618,6 +618,26 @@ export function formatGroundedPlanSummary(planData) {
     ].join("\n");
 }
 
+/** Formats a verified plan catalog without sending it back through the LLM. */
+export function formatGroundedPlanList(planData) {
+    if (!planData || !Array.isArray(planData.plans)) return "";
+    if (planData.plans.length === 0) return "You don't have any saved study plans yet.";
+
+    const lines = [`You have ${planData.plans.length} saved study plan${planData.plans.length === 1 ? "" : "s"}:`];
+    for (const plan of planData.plans) {
+        const subjects = plan.subjects.join(", ") || "No subjects listed";
+        const timing = plan.examDate
+            ? `exam ${plan.examDate}`
+            : `${plan.durationDays ?? "unspecified"}-day goal`;
+        const dailyHours = typeof plan.dailyAvailableHours === "number"
+            ? `${plan.dailyAvailableHours} h/day`
+            : "daily hours not set";
+        const progress = plan.overallProgress ?? "progress unavailable";
+        lines.push(`- **${subjects}** (ID: \`${plan.planId}\`) — ${timing}; ${dailyHours}; ${progress} progress.`);
+    }
+    return lines.join("\n");
+}
+
 /**
  * Formats a clean, grounded confirmation summary directly from a verified record_study_session result.
  * Reports session details (subject, status, hours, date, notes) and updated metrics
@@ -1163,6 +1183,17 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
 
     // Consistency check for create_study_plan
     if (toolName === "create_study_plan" && parsedData) {
+        const actualPlanId = String(parsedData.planId || "default");
+        const claimedPlanIdMatch = finalReply.match(/\bplan\s*id\b\s*[:=#]?\s*["'`*]*([a-zA-Z0-9_-]+)/i);
+        const claimedPlanId = claimedPlanIdMatch?.[1];
+        if (claimedPlanId && !/^(?:is|was|the|a|an)$/i.test(claimedPlanId) && claimedPlanId !== actualPlanId) {
+            return {
+                valid: false,
+                reason: `Final reply claims plan ID "${claimedPlanId}", but the created plan has verified ID "${actualPlanId}".`,
+                correctedReply: formatGroundedPlanSummary(parsedData)
+            };
+        }
+
         const maxDaily = Number(parsedData.dailyStudyHours || toolArgs?.dailyAvailableHours);
 
         const expectedProgress = typeof parsedData.overallProgressPercentage === "number"

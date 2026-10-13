@@ -280,7 +280,10 @@ export function extractExplicitPlanId(text, conversation = []) {
     const isDateLikeOrPlaceholder = (value, sourceText = "", start = -1) => {
         const token = String(value || "");
         const monthDate = new RegExp(`\\b${token}\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}\\b`, "i");
+        const durationAfterNumber = start >= 0 && new RegExp(`^${token}\\s*(?:hours?|hrs?|days?|weeks?)\\b`, "i").test(sourceText.slice(start));
         return /(?:\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(token) ||
+            /^\d+(?:\.\d+)?(?:h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$/i.test(token) ||
+            durationAfterNumber ||
             (start >= 0 && monthDate.test(sourceText.slice(start, start + token.length + 24)));
     };
     const STOP_WORDS = new Set([
@@ -290,6 +293,10 @@ export function extractExplicitPlanId(text, conversation = []) {
         "progress", "date", "exam", "examdate", "exam_date", "exam-date",
         "id", "identifier", "number", "name", "planid", "plan_id"
     ]);
+    // These are ordinary references to a plan, not identifiers. Keep this
+    // separate from STOP_WORDS so a user can still explicitly choose one as
+    // an ID (for example, "plan ID: these").
+    const GENERIC_PLAN_REFERENCE_WORDS = new Set(["these", "those", "all", "any", "existing", "current"]);
 
     const searchInText = (t) => {
         if (typeof t !== "string" || !t.trim()) return null;
@@ -334,7 +341,7 @@ export function extractExplicitPlanId(text, conversation = []) {
                 !/\b(?:named|called)\s*$/i.test(prefix) &&
                 !/[-_\d]/.test(candidate);
             if (ambiguousPreposition) continue;
-            if (candidate && !isDateLikeOrPlaceholder(candidate, t, m.index + candidateOffset) && !isToolNameLike(candidate) && !STOP_WORDS.has(candidate.toLowerCase())) {
+            if (candidate && !isDateLikeOrPlaceholder(candidate, t, m.index + candidateOffset) && !isToolNameLike(candidate) && !STOP_WORDS.has(candidate.toLowerCase()) && !GENERIC_PLAN_REFERENCE_WORDS.has(candidate.toLowerCase())) {
                 return candidate;
             }
         }
@@ -449,6 +456,17 @@ export function isRetrievalIntent(text) {
     return retrievalPatterns.some(p => p.test(clean));
 }
 
+/** Identifies explicit requests to enumerate saved plans, without involving the model. */
+export function isPlanListingIntent(text) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    const clean = text.trim();
+    if (/\b(?:create|make|build|generate|start|prepare)\b.{0,60}\b(?:study\s+)?plans?\b/i.test(clean)) return false;
+    return /\b(?:all|every|each)\b.{0,35}\b(?:my\s+|saved\s+|created\s+|study\s+)?plans?\b/i.test(clean) ||
+        /\b(?:plans?|study\s+plans?)\b.{0,35}\b(?:created|saved|stored)\b/i.test(clean) ||
+        /\b(?:list|give|provide)\b.{0,35}\b(?:all\s+|my\s+|saved\s+|created\s+|study\s+)?plans?\b/i.test(clean) ||
+        /\b(?:show|display)\b.{0,35}\b(?:all|my|saved|created)\s+(?:study\s+)?plans\b/i.test(clean);
+}
+
 /**
  * Detects if a text represents a study plan adaptation or rebalancing intent
  * @param {string} text
@@ -485,6 +503,28 @@ export function isSessionRecordingIntent(text) {
     ];
 
     return sessionPatterns.some(p => p.test(clean));
+}
+
+/** True when a short user reply answers an outstanding study-plan creation question. */
+export function isPlanCreationContinuation(text, conversation = []) {
+    if (typeof text !== "string" || text.trim().length > 100 || !Array.isArray(conversation)) return false;
+    if (/\b(?:create|make|build|generate|retrieve|get|fetch|show|view|record|adapt|adjust)\b.{0,50}\b(?:plan|session|schedule)\b/i.test(text)) return false;
+    const lastAssistantIndex = conversation.map(item => item?.role).lastIndexOf("assistant");
+    if (lastAssistantIndex < 0) return false;
+    const lastAssistant = String(conversation[lastAssistantIndex]?.content || "");
+    if (!/[?？]/.test(lastAssistant) && !/\b(?:could you|please (?:provide|tell|let me know)|let me know|which subject|what subject)\b/i.test(lastAssistant)) return false;
+
+    let lastCreateCompletion = -1;
+    for (let i = 0; i < lastAssistantIndex; i++) {
+        if (conversation[i]?.role === "assistant" && /\b(?:plan|study plan)\b.{0,50}\bcreated successfully\b|\bcreated successfully\b.{0,50}\b(?:plan|plan ID)\b/i.test(String(conversation[i].content || ""))) {
+            lastCreateCompletion = i;
+        }
+    }
+    const priorCreate = conversation.slice(lastCreateCompletion + 1, lastAssistantIndex).some(item =>
+        item?.role === "user" && /\b(?:create|make|build|generate|set up)\b.{0,100}\b(?:study\s+plan|plan)\b/i.test(String(item.content || ""))
+    );
+    const asksCreationDetails = /\b(?:study\s+plan|plan|subject|daily|hours?|duration|days?|week|identifier|plan\s+id)\b/i.test(lastAssistant);
+    return priorCreate && asksCreationDetails;
 }
 
 /**
@@ -932,21 +972,30 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
 
     const currentUserText = options.message || options.userMessage || "";
     if ((toolOrSchema?.name || schema?.name) === "create_study_plan") {
-        const explicitHours = currentUserText.match(/(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:per|a|each)\s*day\b|(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*daily\b|(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:\/|per\s+)day\b/i);
-        const explicitDuration = currentUserText.match(/\b(\d{1,4})\s*[- ]?days?\b|\b(\d{1,3})\s*weeks?\b/i);
-        const hourValue = explicitHours && Number(explicitHours[1] || explicitHours[2] || explicitHours[3]);
+        const contextMessages = options.messages || options.conversation || options.context;
+        const continuation = options.isPlanCreationContinuation ?? isPlanCreationContinuation(currentUserText, contextMessages);
+        const lastCreateCompletion = Array.isArray(contextMessages)
+            ? contextMessages.reduce((last, item, index) => item?.role === "assistant" && /\bcreated successfully\b/i.test(String(item.content || "")) ? index : last, -1)
+            : -1;
+        const creationText = continuation && Array.isArray(contextMessages)
+            ? contextMessages.slice(lastCreateCompletion + 1).filter(item => item?.role === "user" && typeof item.content === "string").map(item => item.content).join(" ")
+            : currentUserText;
+        const explicitHours = [...creationText.matchAll(/(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi)].at(-1);
+        const dailyHoursSpecified = /\b(?:per|a|each)\s*day\b|\bdaily\b|\b(?:hours?|hrs?)\s*\/\s*day\b/i.test(creationText);
+        const explicitDuration = creationText.match(/\b(\d{1,4})\s*[- ]?days?\b|\b(\d{1,3})\s*weeks?\b|\b(\d{1,3})\s*week\b|\b(?:a|one)\s+week\b/i);
+        const hourValue = explicitHours && dailyHoursSpecified && Number(explicitHours[1]);
         const durationValue = explicitDuration && (explicitDuration[1]
             ? Number(explicitDuration[1])
-            : Number(explicitDuration[2]) * 7);
+            : /\b(?:a|one)\s+week\b/i.test(explicitDuration[0]) ? 7 : Number(explicitDuration[2] || explicitDuration[3]) * 7);
         if (Number.isFinite(hourValue) && properties.dailyAvailableHours) normalized.dailyAvailableHours = hourValue;
         else if (currentUserText.trim() && properties.dailyAvailableHours) delete normalized.dailyAvailableHours;
         if (durationValue && properties.durationDays) normalized.durationDays = durationValue;
         else if (currentUserText.trim() && properties.durationDays) delete normalized.durationDays;
-        const explicitDate = extractExplicitDate(currentUserText);
+        const explicitDate = extractExplicitDate(creationText);
         if (explicitDate && properties.examDate) normalized.examDate = explicitDate;
         else if (currentUserText.trim() && properties.examDate &&
-            !/\b\d{4}-\d{2}-\d{2}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}/i.test(currentUserText) &&
-            !(/\b(?:exam\s+date|exam\s+(?:is\s+)?on)\b/i.test(currentUserText) && !/\b(?:no|without|not|don't|do\s+not)\b.{0,20}\b(?:exam\s+date|date)\b/i.test(currentUserText))) {
+            !/\b\d{4}-\d{2}-\d{2}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}/i.test(creationText) &&
+            !(/\b(?:exam\s+date|exam\s+(?:is\s+)?on)\b/i.test(creationText) && !/\b(?:no|without|not|don't|do\s+not)\b.{0,20}\b(?:exam\s+date|date)\b/i.test(creationText))) {
             // A date not supplied by the user is an optional model guess. Omit it so
             // goal-based planning proceeds without a fabricated or stale exam date.
             delete normalized.examDate;
@@ -965,11 +1014,28 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
         const isToolName = currentVal && isToolNameLike(currentVal, options.knownTools);
 
         const contextPlanId = userPlanId;
+        const isCreateTool = (toolOrSchema?.name || schema?.name) === "create_study_plan";
+        const verifiedListedIds = Array.isArray(options.verifiedPlanIds) ? [...options.verifiedPlanIds] : [];
+        for (const item of (options.messages || options.conversation || options.context || [])) {
+            if (item?.role !== "tool" || typeof item.content !== "string") continue;
+            const parsed = tryParseJson(item.content);
+            if (Array.isArray(parsed?.plans)) {
+                verifiedListedIds.push(...parsed.plans.map(plan => plan?.planId).filter(id => typeof id === "string"));
+            }
+        }
         const planIdDescription = String(properties.planId?.description || "");
         const hasDocumentedDefault = /defaults?\s+to\s+['"]?default\b/i.test(planIdDescription);
         if (contextPlanId) {
             // The latest user's explicit identifier always wins over model arguments.
             normalized.planId = contextPlanId;
+        } else if (isCreateTool && currentUserText.trim()) {
+            // Creation IDs are generated by the MCP server unless the user
+            // explicitly supplied one in this request or its active clarification.
+            delete normalized.planId;
+        } else if (options.activePlanId && !isCreateTool) {
+            normalized.planId = options.activePlanId;
+        } else if (!isCreateTool && currentVal && verifiedListedIds.includes(currentVal)) {
+            normalized.planId = currentVal;
         } else if (options.trustedPlanId && currentVal && !isToolName &&
             !/(?:\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(String(currentVal))) {
             // AdaptiveAgent marks arguments trusted only after context resolution and

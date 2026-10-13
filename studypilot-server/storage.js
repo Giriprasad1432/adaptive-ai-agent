@@ -247,6 +247,18 @@ export function savePlan(planId = "default", plan, targetFile = DATA_FILE) {
     }, 5000, 25, lockFile);
 }
 
+/** Create-only save: fail instead of replacing an existing plan with the same ID. */
+export function saveNewPlan(planId, plan, targetFile = DATA_FILE) {
+    const lockFile = `${targetFile}.lock`;
+    return withFileLock(() => {
+        const plans = loadAllPlans(10, 25, targetFile);
+        if (Object.hasOwn(plans, planId)) return false;
+        plans[planId] = plan;
+        _saveAllPlansUnlocked(plans, targetFile);
+        return true;
+    }, 5000, 25, lockFile);
+}
+
 /**
  * Transactionally updates an existing study plan under an exclusive lock.
  * Holds the cross-process file lock across reading the latest database from disk,

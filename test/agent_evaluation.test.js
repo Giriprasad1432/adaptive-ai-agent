@@ -84,6 +84,47 @@ try {
     assert.equal(created.result.planId, "2");
     assert.equal(created.result.overallProgressPercentage, 0);
 
+    // A terse answer to a creation clarification keeps the original intent and
+    // parameters. A model-proposed retrieval tool and "3hrs" ID are corrected.
+    const clarifiedHistory = [
+        { role: "assistant", content: "Your previous study plan was created successfully. Plan ID: default." },
+        { role: "user", content: "Create a plan for a week for one subject." },
+        { role: "assistant", content: "Which subject would you like, and how many hours per day?" },
+        { role: "user", content: "DBMS" },
+        { role: "assistant", content: "Could you provide the plan ID you would like to use?" }
+    ];
+    let clarificationCall = 0;
+    const clarifiedAgent = new AdaptiveAgent({
+        provider: {
+            async chat({ messages }) {
+                clarificationCall++;
+                if (clarificationCall === 1) return { toolCalls: [{
+                    name: "get_study_plan",
+                    arguments: { planId: "3hrs", subjects: ["DBMS"], dailyAvailableHours: 5, durationDays: 30 }
+                }], content: "" };
+                const resultMessage = [...messages].reverse().find(item => item.role === "tool");
+                return { toolCalls: [], content: formatGroundedPlanSummary(JSON.parse(resultMessage.content)) };
+            }
+        },
+        mcpClient: mcp,
+        maxRounds: 2
+    });
+    const clarifiedResult = await clarifiedAgent.run({ message: "generate by own", messages: clarifiedHistory });
+    assert.equal(clarifiedResult.success, true, clarifiedResult.reply);
+    assert.ok(clarifiedResult.steps.some(step => step.type === "intent_tool_redirection" && step.redirectedTool === "create_study_plan"));
+    const clarifiedExecution = clarifiedResult.steps.find(step => step.type === "tool_executing");
+    assert.equal(clarifiedExecution.tool, "create_study_plan");
+    assert.equal(Object.hasOwn(clarifiedExecution.arguments, "dailyAvailableHours"), false,
+        "With no stated hours in the creation request, do not reuse a model guess; use the planner recommendation");
+    assert.equal(clarifiedExecution.arguments.durationDays, 7);
+    assert.equal(Object.hasOwn(clarifiedExecution.arguments, "planId"), false,
+        "The MCP server, not the model, assigns the internal plan ID");
+    const clarifiedCreated = JSON.parse(clarifiedResult.steps.find(step => step.type === "tool_result").content);
+    assert.match(clarifiedCreated.planId, /^DBMS-[a-f0-9]{8}$/i);
+    assert.equal(clarifiedCreated.durationDays, 7);
+    assert.ok(clarifiedCreated.dailyStudyHours > 0);
+    assert.equal(clarifiedResult.activePlanId, clarifiedCreated.planId);
+
     // Exercise another creation phrasing through the same actual MCP server.
     for (const [verb, id] of [["Build", "eval-build-plan"], ["Make", "eval-make-plan"]]) {
         const message = `${verb} a JavaScript study plan with plan ID ${id}, exam date ${examDate}, and 2 hours daily.`;

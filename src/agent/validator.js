@@ -54,13 +54,13 @@ export function validateToolArguments(tool, args = {}, options = {}) {
         return { valid: false, error: 'I could not safely resolve the requested plan ID. Please provide the plan ID.' };
     }
 
-    if (toolName === "get_study_plan" && !args.planId && !/defaults?\s+to\s+['"]?default\b/i.test(String(properties.planId?.description || ""))) {
-        return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+    if (toolName === "get_study_plan" && !args.planId) {
+        return { valid: false, error: 'I could not identify a saved plan from the active conversation. List saved plans and ask the user to choose by subject or description.' };
     }
 
     if (((toolName === "adapt_study_plan" && options.userMessage && isAdaptationIntent(options.userMessage)) ||
         (toolName === "record_study_session" && options.userMessage)) && !args.planId) {
-        return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+        return { valid: false, error: 'I could not identify a saved plan from the active conversation. List saved plans and ask the user to choose by subject or description.' };
     }
 
     if (toolName === "create_study_plan" && options.userMessage &&
@@ -305,6 +305,15 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
         data = JSON.parse(content);
     } catch {
         // Non-JSON textual response
+    }
+
+    if (toolName === "list_study_plans") {
+        if (!data || !Array.isArray(data.plans) || data.plans.some(plan =>
+            !plan || typeof plan.planId !== "string" || !Array.isArray(plan.subjects) ||
+            plan.subjects.some(subject => typeof subject !== "string")
+        )) {
+            return { valid: false, error: "list_study_plans returned malformed plan summaries." };
+        }
     }
 
     // Verification for create_study_plan

@@ -264,7 +264,7 @@ async function runNormalizationSuite() {
 
     const serverScript = path.resolve(__dirname, "../studypilot-server/server.js");
     const mcpManager = new McpClientManager({
-        command: "node",
+        command: process.execPath,
         args: [serverScript],
         env: {
             STUDYPILOT_DATA_DIR: isolatedDataDir
@@ -609,6 +609,8 @@ Adjust as needed for your learning style.`
     // Retrieval IDs must come from explicit user text, verified tool results, or a documented tool default.
     assert.equal(extractExplicitPlanId("What is my exam date?"), null);
     assert.equal(extractExplicitPlanId("My exam is on December 15, 2026, right?"), null);
+    assert.equal(extractExplicitPlanId("create a plan with 3hrs per day for a week for dbms subject"), null,
+        "A study duration or hour amount must never be extracted as a plan identifier");
     assert.equal(extractExplicitPlanId("What is my exam date?", [{ role: "assistant", tool_calls: [{ function: { arguments: { planId: "your_exam_date" } } }] }]), null);
     assert.equal(extractExplicitPlanId("", [{ role: "tool", content: JSON.stringify({ planId: "default", examDate: "2026-11-30" }) }]), "default");
     assert.equal(extractExplicitPlanId("", [{ role: "tool", content: JSON.stringify({ planId: "2026-12-15" }) }]), null);
@@ -619,10 +621,49 @@ Adjust as needed for your learning style.`
     const normDefaultGet = normalizeToolArguments(defaultPlanSchema, { planId: "2026-12-15" }, { message: "What is my exam date?" });
     assert.equal(normDefaultGet.planId, "default", "Documented default plan ID must replace model-invented date-like IDs");
     const missingIdValidation = validateToolArguments(getPlanSchema, normUntrustedGet);
-    assert.match(missingIdValidation.error, /provide the plan ID/i, "Missing safe plan ID must request clarification");
+    assert.match(missingIdValidation.error, /choose by subject or description/i, "Missing safe plan context must ask the user to choose by description");
     assert.equal(isRetrievalIntent("How is my study plan progress?"), true);
     assert.equal(isRetrievalIntent("My exam is on December 15, 2026, right?"), true);
     assert.equal(isExamDateRequested("My exam is on December 15, 2026, right?"), true);
+
+    const createContinuation = [
+        { role: "user", content: "create a plan that for 7 days 2-5 hrs a day for dbms subject" },
+        { role: "assistant", content: "You mentioned 2–5 hrs a day. Could you let me know the exact number of hours per day?" },
+        { role: "user", content: "3 hrs" }
+    ];
+    const clarifiedCreate = normalizeToolArguments(studyPlanSchema, {
+        subjects: ["DBMS"], dailyAvailableHours: 5, durationDays: 30, planId: "3hrs"
+    }, {
+        message: "3 hrs",
+        messages: createContinuation,
+        knownTools: ["create_study_plan", "get_study_plan"]
+    });
+    assert.equal(clarifiedCreate.dailyAvailableHours, 3, "The clarification answer must supply the chosen daily-hours value");
+    assert.equal(clarifiedCreate.durationDays, 7, "The original seven-day duration must survive the clarification turn");
+    assert.equal(Object.hasOwn(clarifiedCreate, "planId"), false, "An hours phrase must not become a plan ID");
+
+    const weekCreate = normalizeToolArguments(studyPlanSchema, {
+        subjects: ["DBMS"], dailyAvailableHours: 3, durationDays: 30, planId: "3hrs"
+    }, { message: "study plan with 3hrs per day for a week for dbms subject" });
+    assert.equal(weekCreate.durationDays, 7, "Singular 'a week' must normalize to seven days");
+    assert.equal(weekCreate.dailyAvailableHours, 3);
+    assert.equal(Object.hasOwn(weekCreate, "planId"), false);
+
+    const createdDefaultPlan = {
+        planId: "default", subjects: ["DBMS"], examDate: null, durationDays: 7,
+        dailyStudyHours: 3, dailyHoursSource: "user", durationSource: "user",
+        overallProgressPercentage: 0,
+        subjectAllocations: { DBMS: { priority: "medium", allocatedHours: 21 } }
+    };
+    const wrongCreatedIdCheck = verifyFinalAnswerConsistency(
+        "Your study plan was created successfully. Plan ID: 3hrs. It covers 30 days.",
+        [{ toolName: "create_study_plan", toolArgs: { subjects: ["DBMS"], dailyAvailableHours: 3, durationDays: 7 }, isError: false, parsedData: createdDefaultPlan }],
+        "create a study plan with 3hrs per day for a week for dbms subject"
+    );
+    assert.equal(wrongCreatedIdCheck.valid, false, "A model-invented creation plan ID must fail grounding");
+    assert.match(wrongCreatedIdCheck.reason, /verified ID "default"/);
+    assert.match(wrongCreatedIdCheck.correctedReply, /Study plan "default" created successfully/);
+    assert.match(wrongCreatedIdCheck.correctedReply, /7 days/);
     assert.match(formatGroundedRetrievalSummary({ planId: "default", overallProgress: "19%", totalCompletedHours: 28, totalRemainingHours: 119, totalAllocatedHours: 147, subjects: { Mathematics: { allocatedHours: 88, completedHours: 28, remainingHours: 60, missedHours: 0, priority: "high" } } }, "How is my study plan progress?"), /19% progress.*28 of 147 allocated hours.*119 hours remaining/);
     assert.doesNotMatch(formatGroundedRetrievalSummary({ planId: "default", overallProgress: "19%", totalCompletedHours: 28, totalRemainingHours: 119, subjects: { Mathematics: { allocatedHours: 88, completedHours: 28, remainingHours: 60, missedHours: 0, priority: "high" } } }, "How is my study plan progress?"), /Mathematics/);
 

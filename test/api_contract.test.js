@@ -13,6 +13,7 @@ const agent = {
         captured.push(input);
         if (input.message === "simulate failure") return { reply: "Action Failed: plan unavailable.", success: false, partialSuccess: false, rounds: 1, steps: [{ type: "tool_result", isError: true }] };
         if (input.message === "simulate exception") throw new Error("agent unavailable");
+        if (input.message === "create active plan") return { reply: "Created.", success: true, activePlanId: "dbms-deadbeef", rounds: 1, steps: [] };
         return { reply: "Your plan is at 0% progress.", success: true, rounds: 2, steps: [{ type: "tool_result", content: "verified fixture" }] };
     }
 };
@@ -30,7 +31,9 @@ try {
     assert.equal(health.status, 200);
     assert.equal(health.headers.get("access-control-allow-origin"), "*");
     assert.deepEqual(await health.json(), {
-        status: "running", provider: "ollama", model: "llama3.2",
+        status: "running",
+        provider: process.env.AI_PROVIDER || "ollama",
+        model: "test-model",
         providerStatus: { available: true, model: "test-model" },
         mcp: { connected: true, toolCount: 1, tools: expectedTools }
     });
@@ -45,16 +48,29 @@ try {
     assert.equal(invalid.status, 400);
     assert.deepEqual(await invalid.json(), { error: "A valid message is required." });
 
-    const chatInput = { message: "Retrieve plan 2", messages: [{ role: "user", content: "prior context" }] };
+    const chatInput = { message: "Retrieve plan 2", messages: [{ role: "user", content: "prior context" }], conversationId: "api-session-0001" };
     const chat = await fetch(`${base}/api/chat`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chatInput)
     });
     assert.equal(chat.status, 200);
     assert.deepEqual(await chat.json(), {
         reply: "Your plan is at 0% progress.", success: true, partialSuccess: false, rounds: 2,
-        steps: [{ type: "tool_result", content: "verified fixture" }]
+        steps: [{ type: "tool_result", content: "verified fixture" }], conversationId: "api-session-0001"
     });
-    assert.deepEqual(captured[0], chatInput, "API must pass user message and conversational context unchanged");
+    assert.deepEqual(captured[0], { message: chatInput.message, messages: chatInput.messages }, "API must pass user message and conversational context unchanged");
+
+    const createActive = await fetch(`${base}/api/chat`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "create active plan", conversationId: "conversation-test-01" })
+    });
+    const createActiveData = await createActive.json();
+    assert.equal(createActiveData.conversationId, "conversation-test-01");
+    const followUp = await fetch(`${base}/api/chat`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "show my progress", conversationId: "conversation-test-01" })
+    });
+    assert.equal((await followUp.json()).success, true);
+    assert.equal(captured.at(-1).activePlanId, "dbms-deadbeef", "The API must retain the verified active plan per conversation");
 
     const failedOperation = await fetch(`${base}/api/chat`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "simulate failure" })

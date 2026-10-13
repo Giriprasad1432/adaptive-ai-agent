@@ -42,23 +42,27 @@ adaptive-ai-agent/
 
 ## StudyPilot MCP Tools
 
-The StudyPilot MCP server exposes 4 tools via the official `@modelcontextprotocol/sdk`:
+The StudyPilot MCP server exposes 5 tools via the official `@modelcontextprotocol/sdk`:
 
-1. **`create_study_plan`**
+1. **`list_study_plans`**
+   - **Description**: Lists saved plans by subject and goal so users can select a plan without remembering internal IDs.
+   - **Parameters**: None.
+
+2. **`create_study_plan`**
    - **Description**: Generates an initial priority-weighted study schedule from a subject list, exam date, daily available hours, and optional subject priorities (`high`, `medium`, `low`).
    - **Parameters**: `subjects` (array/string), `examDate` (YYYY-MM-DD), `dailyAvailableHours` (number), `priorities` (object, optional), `planId` (string, optional).
 
-2. **`get_study_plan`**
+3. **`get_study_plan`**
    - **Description**: Retrieves the saved study plan, showing total completed hours, missed hours, remaining workload, progress percentage, and recent session logs.
-   - **Parameters**: `planId` (string, optional, defaults to `"default"`).
+   - **Parameters**: `planId` (string, optional in the tool schema). StudyPilot resolves an explicit ID, the active conversation's verified plan, or an unambiguous saved-plan selection; it never silently defaults to another plan.
 
-3. **`record_study_session`**
+4. **`record_study_session`**
    - **Description**: Records a completed, partially completed, or missed session. Updates subject progress and logs missed hours if a session was skipped.
-   - **Parameters**: `subject` (string), `hoursSpent` (number), `status` (`completed` | `partially_completed` | `missed`), `notes` (string, optional), `date` (YYYY-MM-DD, optional), `planId` (string, optional).
+   - **Parameters**: `subject` (string), `hoursSpent` (number), `status` (`completed` | `partially_completed` | `missed`), `notes` (string, optional), `date` (YYYY-MM-DD, optional), `planId` (string, optional in the schema; resolved safely from the active conversation or a verified saved plan).
 
-4. **`adapt_study_plan`**
+5. **`adapt_study_plan`**
    - **Description**: Re-evaluates remaining days until the exam, recalculates subject hour allocations, prioritizes backlog recovery from missed sessions, and warns if the remaining workload requires increasing daily study hours.
-   - **Parameters**: `planId` (string, optional), `reason` (string, optional), `newExamDate` (YYYY-MM-DD, optional), `newDailyAvailableHours` (number, optional).
+   - **Parameters**: `planId` (string, optional in the schema; never defaults to another plan), `reason` (string, optional), `newExamDate` (YYYY-MM-DD, optional), `newDailyAvailableHours` (number, optional).
 
 ---
 
@@ -67,7 +71,7 @@ The StudyPilot MCP server exposes 4 tools via the official `@modelcontextprotoco
 ### Prerequisites
 
 1. **Node.js**: v18+ (tested on Node.js v22)
-2. **Ollama**: Running locally with `llama3.2` installed:
+2. **An AI provider**: Ollama with `llama3.2`, or Groq with a valid API key:
    ```bash
    ollama pull llama3.2
    ```
@@ -80,7 +84,7 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-Default configuration in `.env`:
+Example local Ollama configuration in `.env` (the project also supports `AI_PROVIDER=groq` with `GROQ_API_KEY` set):
 
 ```env
 PORT=3000
@@ -121,7 +125,7 @@ npm test
 
 This test:
 1. Connects a real MCP client via `StdioClientTransport` to `studypilot-server/server.js`.
-2. Discovers and asserts all 4 StudyPilot tools.
+2. Discovers and asserts all 5 StudyPilot tools.
 3. Creates a study plan (`Mathematics` [high], `Physics` [medium], `Chemistry` [low]).
 4. Retrieves the created plan and verifies allocations.
 5. Records a completed session for Chemistry.
@@ -167,7 +171,7 @@ Response:
 
 ## Phase 4 Readiness: Sample React Frontend
 
-There is no frontend in the repository yet. A small Vite client can live in `frontend/`; keep it as a thin client of the existing Express API.
+The React + Vite client lives in `frontend/` and remains a thin client of the existing Express API.
 
 ### Start commands
 
@@ -185,7 +189,7 @@ npm install
 npm start
 ```
 
-The API listens on `http://localhost:3000` by default. Required backend settings are `AI_PROVIDER=ollama`, `OLLAMA_HOST=http://127.0.0.1:11434`, `OLLAMA_MODEL=llama3.2`, and `MCP_SERVER_COMMAND=node` with `MCP_SERVER_ARGS=./studypilot-server/server.js`. `PORT` optionally changes the Express API port. The MCP server defaults to Stdio; HTTP mode uses `MCP_TRANSPORT=http`, `MCP_HTTP_HOST=127.0.0.1`, and `MCP_HTTP_PORT=3001` (the MCP listener uses `PORT` first if that variable is set in its process environment). To have the backend connect over HTTP, configure `MCP_SERVER_URL=http://127.0.0.1:3001/mcp` and leave `MCP_SERVER_COMMAND` unset. The HTTP integration test currently fails during MCP initialization (see the test results in the project task report); use the known-working Stdio mode until that blocker is resolved.
+The API listens on `http://localhost:3000` by default. For local Ollama, set `AI_PROVIDER=ollama`, `OLLAMA_HOST=http://127.0.0.1:11434`, and `OLLAMA_MODEL=llama3.2`; for Groq, set `AI_PROVIDER=groq` and provide a valid `GROQ_API_KEY`. MCP defaults to Stdio with `MCP_SERVER_COMMAND=node` and `MCP_SERVER_ARGS=./studypilot-server/server.js`. `PORT` changes the Express API port. Standalone MCP HTTP mode uses `MCP_TRANSPORT=http`, `MCP_HTTP_HOST=127.0.0.1`, and `MCP_HTTP_PORT=3001`; `PORT` takes precedence if set in that process. The backend can use HTTP by setting `MCP_SERVER_URL=http://127.0.0.1:3001/mcp` and leaving `MCP_SERVER_COMMAND` unset. The current HTTP integration test fails during MCP initialization; use Stdio for manual frontend testing while that blocker remains unresolved.
 
 To start the standalone MCP HTTP listener for integration work (in one PowerShell terminal):
 
@@ -196,10 +200,9 @@ $env:MCP_HTTP_PORT = "3001"
 node studypilot-server/server.js
 ```
 
-Create the minimal Vite project when beginning Phase 4:
+Start the frontend in a second terminal:
 
 ```powershell
-npm create vite@latest frontend -- --template react
 cd frontend
 npm install
 npm run dev
@@ -217,11 +220,13 @@ Health check: `GET /api/health`
   "provider": "ollama",
   "model": "llama3.2",
   "providerStatus": { "available": true },
-  "mcp": { "configured": true, "connected": true, "toolCount": 4 }
+  "mcp": { "configured": true, "connected": true, "toolCount": 5 }
 }
 ```
 
-Tool discovery: `GET /api/tools` returns `{ "connected": true, "toolCount": 4, "tools": [...] }`, where each tool includes its name, description, and input schema.
+Tool discovery: `GET /api/tools` returns `{ "connected": true, "toolCount": 5, "tools": [...] }`, where each tool includes its name, description, and input schema.
+
+Plan IDs are generated internally when the user does not provide one. New plans never overwrite an existing ID. The API keeps the verified active plan associated with the frontend conversation ID, so users can refer to “my plan” without remembering its internal identifier. When a conversation has no active plan, StudyPilot lists saved plans and resolves an unambiguous choice by subject; otherwise it asks the user to choose by subject or description.
 
 Chat: `POST /api/chat` with `Content-Type: application/json`:
 
@@ -231,7 +236,7 @@ Chat: `POST /api/chat` with `Content-Type: application/json`:
 
 The response contains `reply`, `success`, `partialSuccess`, `rounds`, and `steps`. Invalid/missing messages return HTTP 400 with `{ "error": "A valid message is required." }`; unexpected server errors return HTTP 500 with an `error` string. Tool failures can return HTTP 200 with `success: false`, so the frontend must display the reply and failure state instead of treating every 200 response as success.
 
-The API currently enables CORS with `cors()` and permits local Vite development origins without credentials. Keep API calls on the backend; do not call Ollama or MCP directly from the browser.
+The API currently uses `cors()` with its default wildcard origin and no credentials. This is suitable for local development; restrict origins before production deployment. Keep provider calls and MCP access on the backend; do not call Ollama or MCP directly from the browser.
 
 ### Suggested components and acceptance checklist
 

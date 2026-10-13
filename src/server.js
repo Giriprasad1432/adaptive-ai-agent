@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { getProvider } from "./providers/index.js";
 import { getMcpClient } from "./mcp/index.js";
@@ -15,6 +16,7 @@ export function createApp({ provider, mcpClient, agent } = {}) {
     const resolvedMcpClient = mcpClient || getMcpClient();
     const resolvedAgent = agent || new AdaptiveAgent({ provider: resolvedProvider, mcpClient: resolvedMcpClient });
     const app = express();
+    const activePlansByConversation = new Map();
     app.use(cors());
     app.use(express.json());
 
@@ -26,8 +28,8 @@ export function createApp({ provider, mcpClient, agent } = {}) {
 
         res.json({
             status: "running",
-            provider: process.env.AI_PROVIDER || "ollama",
-            model: process.env.OLLAMA_MODEL || "llama3.2",
+            provider: providerHealth.provider || process.env.AI_PROVIDER || "ollama",
+            model: providerHealth.model || resolvedProvider.model || process.env.OLLAMA_MODEL || "llama3.2",
             providerStatus: providerHealth,
             mcp: resolvedMcpClient.getStatus()
         });
@@ -48,18 +50,26 @@ export function createApp({ provider, mcpClient, agent } = {}) {
 
     app.post("/api/chat", async (req, res) => {
         try {
-            const { message, messages } = req.body;
+            const { message, messages, conversationId } = req.body;
             if (!message || typeof message !== "string") {
                 return res.status(400).json({ error: "A valid message is required." });
             }
 
-            const result = await resolvedAgent.run({ message, messages });
+            const sessionId = typeof conversationId === "string" && /^[a-zA-Z0-9_-]{8,100}$/.test(conversationId)
+                ? conversationId
+                : randomUUID();
+            const agentOptions = { message, messages };
+            const previousActivePlanId = activePlansByConversation.get(sessionId);
+            if (previousActivePlanId) agentOptions.activePlanId = previousActivePlanId;
+            const result = await resolvedAgent.run(agentOptions);
+            if (result.activePlanId) activePlansByConversation.set(sessionId, result.activePlanId);
             res.json({
                 reply: result.reply,
                 success: result.success,
                 partialSuccess: Boolean(result.partialSuccess),
                 rounds: result.rounds,
-                steps: result.steps
+                steps: result.steps,
+                conversationId: sessionId
             });
         } catch (error) {
             console.error("[Server] Chat processing error:", error.message);

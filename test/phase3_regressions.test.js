@@ -3,7 +3,8 @@ import {
     extractExplicitPlanId,
     normalizeToolArguments,
     shouldOmitSessionDate,
-    isRetrievalIntent
+    isRetrievalIntent,
+    isPlanListingIntent
 } from "../src/agent/normalizer.js";
 import { validateToolArguments, verifyToolResult } from "../src/agent/validator.js";
 import { verifyFinalAnswerConsistency, formatGroundedRetrievalSummary } from "../src/agent/consistencyChecker.js";
@@ -42,12 +43,17 @@ const recordTool = {
 };
 
 // Explicit latest-turn identifiers must override conflicting model output and older results.
-assert.equal(extractExplicitPlanId("Adapt study plan these because I have 1 hour per day"), "these");
-assert.equal(extractExplicitPlanId("Retrieve study plan these"), "these");
+assert.equal(extractExplicitPlanId("Adapt study plan these because I have 1 hour per day"), null, "A generic reference must not become a plan ID");
+assert.equal(extractExplicitPlanId("Retrieve study plan these"), null, "A generic reference must not become a plan ID");
+assert.equal(extractExplicitPlanId("Retrieve plan ID: these"), "these", "Explicitly labeled IDs remain valid even when their value is an ordinary word");
+assert.equal(isPlanListingIntent("give all my plans"), true);
+assert.equal(isPlanListingIntent("give all plans that created"), true);
+assert.equal(isPlanListingIntent("create a plan for 10 days"), false, "Plan creation must not be routed to catalog listing");
 assert.equal(extractExplicitPlanId("Create a study plan for Mathematics"), null, "A plan subject is not a plan ID");
 assert.equal(extractExplicitPlanId("Show me my study plan for mutation-test-oct12"), "mutation-test-oct12");
 assert.equal(extractExplicitPlanId("Adapt study plan adaptive-demo"), "adaptive-demo");
 const exactPlanIdRequest = "Show me the complete study plan with ID 2, including subject allocations, completed hours, remaining hours, and progress.";
+assert.equal(isPlanListingIntent(exactPlanIdRequest), false, "A full-plan retrieval is not a catalog request");
 assert.equal(extractExplicitPlanId(exactPlanIdRequest), "2", "The value after the plan ID label is the explicit ID");
 assert.equal(extractExplicitPlanId("Retrieve the study plan with ID 2."), "2", "The value after 'plan with ID' is explicit");
 assert.equal(normalizeToolArguments(getTool, { planId: "2" }, { message: "Show the plan with ID 2." }).planId, "2");
@@ -66,7 +72,7 @@ assert.equal(extractExplicitPlanId("Retrieve study plan December 15, 2026"), nul
 assert.equal(extractExplicitPlanId("What is my exam date?"), null);
 assert.equal(extractExplicitPlanId("Retrieve the exam date for December 15, 2026"), null);
 const staleContext = [{ role: "tool", content: JSON.stringify({ planId: "adaptive-demo" }) }];
-assert.equal(extractExplicitPlanId("Adapt study plan these", staleContext), "these");
+assert.equal(extractExplicitPlanId("Adapt study plan current-plan", staleContext), "current-plan");
 assert.equal(extractExplicitPlanId("", [{ role: "assistant", content: 'Study plan "stale-plan" created successfully' }]), null);
 assert.equal(extractExplicitPlanId("Adapt my plan", [
     { role: "tool", content: JSON.stringify({ planId: "stale-plan" }) },
@@ -82,11 +88,45 @@ assert.equal(extractExplicitPlanId("Show my plan", [
 for (const name of ["adapt_study_plan", "get_study_plan", "record_study_session"]) {
     const schema = name === "adapt_study_plan" ? adaptTool : name === "get_study_plan" ? getTool : recordTool;
     const args = normalizeToolArguments(schema, { planId: "adaptive-demo" }, {
-        message: name === "get_study_plan" ? "Retrieve study plan these" : "Adapt study plan these because I have 1 hour per day"
+        message: name === "get_study_plan" ? "Retrieve study plan these-plan" : "Adapt study plan these-plan because I have 1 hour per day"
     });
-    assert.equal(args.planId, "these", `${name} must pass the latest explicit ID`);
+    assert.equal(args.planId, "these-plan", `${name} must pass the latest explicit ID`);
 }
 assert.equal(normalizeToolArguments(adaptTool, { planId: "adaptive-demo" }, { message: "Adapt study plan adaptive-demo" }).planId, "adaptive-demo");
+{
+    let providerCalls = 0;
+    const toolCalls = [];
+    const plans = Array.from({ length: 182 }, (_, index) => ({
+        planId: `subject-${index + 1}`,
+        subjects: [`Subject ${index + 1}`],
+        examDate: null,
+        durationDays: 10,
+        dailyAvailableHours: 2,
+        overallProgress: "0%",
+        totalRemainingHours: 20
+    }));
+    const agent = new AdaptiveAgent({
+        provider: { async chat() { providerCalls++; throw new Error("Plan listing should not call the model"); } },
+        mcpClient: {
+            listTools: () => [
+                { name: "list_study_plans", inputSchema: { type: "object", properties: {} } },
+                createTool
+            ],
+            async callTool(name) {
+                toolCalls.push(name);
+                return { isError: false, content: JSON.stringify({ plans, count: plans.length }) };
+            }
+        }
+    });
+    for (const message of ["give all my plans", "give all plans that created"]) {
+        const result = await agent.run({ message });
+        assert.equal(result.success, true, `${message} should return the verified catalog`);
+        assert.match(result.reply, /182 saved study plans/);
+        assert.match(result.reply, /subject-182/);
+    }
+    assert.equal(providerCalls, 0, "Large plan catalogs must not be sent back through an LLM round");
+    assert.deepEqual(toolCalls, ["list_study_plans", "list_study_plans"], "Listing must never trigger create_study_plan");
+}
 {
     let calledArgs;
     const agent = new AdaptiveAgent({
@@ -147,19 +187,19 @@ for (const name of ["get_study_plan", "adapt_study_plan"]) {
             async callTool(_name, args) {
                 calledArgs = args;
                 const payload = name === "get_study_plan"
-                    ? { planId: "these", subjects: {}, totalRemainingHours: 0, totalSessionsRecorded: 0 }
-                    : { planId: "these", daysRemaining: 7, recommendedDailyHours: 1, reason: "User reduced availability", adjustedSubjectAllocations: { JavaScript: { allocatedHours: 7, completedHours: 0, remainingHours: 7, progress: "0%" } } };
+                    ? { planId: "these-plan", subjects: {}, totalRemainingHours: 0, totalSessionsRecorded: 0 }
+                    : { planId: "these-plan", daysRemaining: 7, recommendedDailyHours: 1, reason: "User reduced availability", adjustedSubjectAllocations: { JavaScript: { allocatedHours: 7, completedHours: 0, remainingHours: 7, progress: "0%" } } };
                 return { isError: false, content: JSON.stringify(payload) };
             }
         }
     });
-    const result = await agent.run({ message: name === "get_study_plan" ? "Retrieve study plan these" : "Adapt study plan these to 1 hour per day" });
-    assert.equal(calledArgs.planId, "these", `${name} call must use the latest explicit plan ID`);
+    const result = await agent.run({ message: name === "get_study_plan" ? "Retrieve study plan these-plan" : "Adapt study plan these-plan to 1 hour per day" });
+    assert.equal(calledArgs.planId, "these-plan", `${name} call must use the latest explicit plan ID`);
     assert.equal(result.success, true);
 }
 const unresolved = normalizeToolArguments(adaptTool, { planId: "invented-plan" }, { message: "Adapt my study plan" });
 assert.equal(Object.hasOwn(unresolved, "planId"), false);
-assert.match(validateToolArguments(adaptTool, unresolved, { userMessage: "Adapt my study plan" }).error, /provide the plan ID/i);
+assert.match(validateToolArguments(adaptTool, unresolved, { userMessage: "Adapt my study plan" }).error, /choose by subject or description/i);
 const sanitizer = new McpClientManager();
 assert.equal(sanitizer.sanitizeArguments({ planId: "unknown-explicit-plan" }, getTool.inputSchema, { toolName: "get_study_plan" }).planId, "unknown-explicit-plan");
 assert.equal(sanitizer.sanitizeArguments({ planId: "unknown-explicit-plan" }, getTool.inputSchema, { toolName: "get_study_plan", trustedPlanId: true }).planId, "unknown-explicit-plan");
@@ -308,14 +348,14 @@ for (const statedHours of [0, -2]) {
 
 // Adaptation changes only supplied fields and preserves sessions, subjects, and exam date.
 const preservePlan = createPlan({
-    planId: "these", subjects: ["JavaScript", "React"], examDate: "2026-11-15",
+    planId: "these-plan", subjects: ["JavaScript", "React"], examDate: "2026-11-15",
     dailyAvailableHours: 2, referenceDate: ref
 });
 recordSession(preservePlan, { subject: "JavaScript", hoursSpent: 1, status: "completed", date: "2026-10-02" });
 const beforeSubjects = Object.keys(preservePlan.subjects);
 const beforeSession = preservePlan.sessions[0];
 adaptPlan(preservePlan, { newDailyAvailableHours: 1, reason: "Reduced daily availability", referenceDate: ref });
-assert.equal(preservePlan.planId, "these");
+assert.equal(preservePlan.planId, "these-plan");
 assert.equal(preservePlan.examDate, "2026-11-15");
 assert.equal(preservePlan.dailyAvailableHours, 1);
 assert.deepEqual(Object.keys(preservePlan.subjects), beforeSubjects);
@@ -474,7 +514,7 @@ assert.doesNotMatch(noExamDateResult.reply, /October\s+(?:20|27),\s+2026/i);
 // Duplicate session tool calls in one agent turn execute once; failures cannot be
 // overwritten by a model claim that the mutation succeeded.
 const sessionOutcome = {
-    planId: "these",
+    planId: "these-plan",
     session: { id: "session-one", subject: "JavaScript", hoursSpent: 1, status: "completed", date: "2026-10-13" },
     subjectProgress: { subject: "JavaScript", completedHours: 1, remainingHours: 9, missedHours: 0, progressPercentage: "10%" },
     overallPlanProgress: "10%"
@@ -486,8 +526,8 @@ const duplicateAgent = new AdaptiveAgent({
         this.count++;
         return this.count === 1
             ? { toolCalls: [
-                { name: "record_study_session", arguments: { subject: "JavaScript", hoursSpent: 1, status: "completed", planId: "these" } },
-                { name: "record_study_session", arguments: { subject: "JavaScript", hoursSpent: 1, status: "completed", planId: "these" } }
+                { name: "record_study_session", arguments: { subject: "JavaScript", hoursSpent: 1, status: "completed", planId: "these-plan" } },
+                { name: "record_study_session", arguments: { subject: "JavaScript", hoursSpent: 1, status: "completed", planId: "these-plan" } }
             ], content: "" }
             : { toolCalls: [], content: "Recorded the 1-hour JavaScript study session. It is at 10% progress." };
     } },
@@ -496,7 +536,7 @@ const duplicateAgent = new AdaptiveAgent({
         async callTool() { sessionCalls++; return { isError: false, content: JSON.stringify(sessionOutcome) }; }
     }
 });
-const duplicateResult = await duplicateAgent.run({ message: "Record a 1-hour JavaScript study session for plan these." });
+const duplicateResult = await duplicateAgent.run({ message: "Record a 1-hour JavaScript study session for plan these-plan." });
 assert.equal(sessionCalls, 1);
 assert.equal(duplicateResult.success, true);
 
@@ -504,15 +544,15 @@ const failedAgent = new AdaptiveAgent({
     provider: { count: 0, async chat() {
         this.count++;
         return this.count === 1
-            ? { toolCalls: [{ name: "record_study_session", arguments: { subject: "JavaScript", hoursSpent: 1, status: "completed", planId: "these" } }], content: "" }
+            ? { toolCalls: [{ name: "record_study_session", arguments: { subject: "JavaScript", hoursSpent: 1, status: "completed", planId: "these-plan" } }], content: "" }
             : { toolCalls: [], content: "The session was recorded successfully." };
     } },
     mcpClient: {
         listTools: () => [sessionTool],
-        async callTool() { return { isError: true, content: "No study plan found with ID these" }; }
+        async callTool() { return { isError: true, content: "No study plan found with ID these-plan" }; }
     }
 });
-const failedResult = await failedAgent.run({ message: "Record a 1-hour JavaScript study session for plan these." });
+const failedResult = await failedAgent.run({ message: "Record a 1-hour JavaScript study session for plan these-plan." });
 assert.equal(failedResult.success, false);
 assert.match(failedResult.reply, /Action Failed/i);
 assert.doesNotMatch(failedResult.reply, /recorded successfully/i);

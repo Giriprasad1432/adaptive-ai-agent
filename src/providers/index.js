@@ -1,12 +1,14 @@
 import { BaseProvider } from "./baseProvider.js";
 import { OllamaProvider } from "./ollamaProvider.js";
+import { GroqProvider } from "./groqProvider.js";
 
 /**
  * Provider registry mapping provider identifiers to their implementation classes.
  * Groq or other providers can be registered here easily.
  */
 const providerRegistry = {
-    ollama: OllamaProvider
+    ollama: OllamaProvider,
+    groq: GroqProvider
 };
 
 /**
@@ -42,4 +44,4 @@ export function getProvider(name = process.env.AI_PROVIDER || "ollama", config =
     return new ProviderClass(config);
 }
 
-export { BaseProvider, OllamaProvider };
+export { BaseProvider, OllamaProvider, GroqProvider };

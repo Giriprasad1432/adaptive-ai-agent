@@ -29,7 +29,7 @@ async function runDeterministicTests() {
     });
 
     const transport = new StdioClientTransport({
-        command: "node",
+        command: process.execPath,
         args: [serverScript],
         env: {
             ...process.env,
@@ -48,6 +48,7 @@ async function runDeterministicTests() {
         console.log(`✓ Discovered ${tools.length} tools: [${toolNames.join(", ")}]`);
 
         const expectedTools = [
+            "list_study_plans",
             "create_study_plan",
             "get_study_plan",
             "record_study_session",
@@ -57,9 +58,22 @@ async function runDeterministicTests() {
         for (const expected of expectedTools) {
             assert.ok(toolNames.includes(expected), `Missing expected tool: ${expected}`);
         }
-        console.log("✓ Tool catalog verified: all 4 StudyPilot tools registered");
+        console.log("✓ Tool catalog verified: all 5 StudyPilot tools registered");
 
         const testPlanId = `test_plan_${Date.now()}`;
+
+        // An omitted ID is generated uniquely, and the plan can be found without
+        // exposing that internal identifier as a user requirement.
+        const generatedCreate = await client.callTool({
+            name: "create_study_plan",
+            arguments: { subjects: ["DBMS"], durationDays: 3, dailyAvailableHours: 2 }
+        });
+        assert.equal(Boolean(generatedCreate.isError), false);
+        const generatedPlan = JSON.parse(generatedCreate.content[0].text);
+        assert.match(generatedPlan.planId, /^dbms-[a-f0-9]{8}$/);
+        const listedPlans = await client.callTool({ name: "list_study_plans", arguments: {} });
+        assert.equal(Boolean(listedPlans.isError), false);
+        assert.ok(JSON.parse(listedPlans.content[0].text).plans.some(plan => plan.planId === generatedPlan.planId));
 
         // Step 3: Test create_study_plan
         console.log(`\n--- Test 1: create_study_plan (planId: ${testPlanId}) ---`);
@@ -93,6 +107,14 @@ async function runDeterministicTests() {
             createData.subjectAllocations.Mathematics.allocatedHours > createData.subjectAllocations.Chemistry.allocatedHours,
             "High priority subject (Math) should receive more hours than low priority (Chemistry)"
         );
+        const duplicateCreate = await client.callTool({
+            name: "create_study_plan",
+            arguments: { planId: testPlanId, subjects: ["History"], durationDays: 9, dailyAvailableHours: 1 }
+        });
+        assert.equal(Boolean(duplicateCreate.isError), true, "An explicit ID collision must be rejected");
+        const duplicateText = duplicateCreate.content?.map(item => item.text).join("\n") || "";
+        assert.match(duplicateText, /already exists/i);
+        assert.equal(getPlan(testPlanId).subjects.History, undefined, "A duplicate create must not replace the saved plan");
         console.log("✓ create_study_plan succeeded:");
         console.log(`  Total hours: ${createData.totalAllocatedHours}h across 3 subjects`);
         console.log(`  Allocations: Math=${createData.subjectAllocations.Mathematics.allocatedHours}h, Physics=${createData.subjectAllocations.Physics.allocatedHours}h, Chem=${createData.subjectAllocations.Chemistry.allocatedHours}h`);

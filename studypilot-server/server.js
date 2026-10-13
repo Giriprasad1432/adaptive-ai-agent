@@ -2,8 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getPlan, savePlan, updatePlan } from "./storage.js";
+import { getPlan, loadAllPlans, saveNewPlan, updatePlan } from "./storage.js";
 import { createPlan, recordSession, adaptPlan, getActiveSessionCount } from "./planner.js";
 
 function createMcpServer() {
@@ -15,6 +16,29 @@ function createMcpServer() {
 
     // 1. Tool: create_study_plan
     mcp.tool(
+        "list_study_plans",
+        "List saved study plans so the user can refer to them by subject or goal without remembering internal plan IDs.",
+        {},
+        async () => {
+            try {
+                const plans = loadAllPlans();
+                const summaries = Object.entries(plans).map(([planId, plan]) => ({
+                    planId,
+                    subjects: Object.keys(plan.subjects || {}),
+                    examDate: plan.examDate || null,
+                    durationDays: plan.durationDays || null,
+                    dailyAvailableHours: plan.dailyAvailableHours || null,
+                    overallProgress: plan.overallProgress || `${plan.overallProgressPercentage || 0}%`,
+                    totalRemainingHours: plan.totalRemainingHours ?? null
+                }));
+                return { content: [{ type: "text", text: JSON.stringify({ plans: summaries, count: summaries.length }) }] };
+            } catch (error) {
+                return { isError: true, content: [{ type: "text", text: `Failed to list study plans: ${error.message}` }] };
+            }
+        }
+    );
+
+    mcp.tool(
         "create_study_plan",
         "Create a structured exam-preparation or goal-based learning plan. examDate is optional for goal plans; use durationDays when a learning period is specified. dailyAvailableHours is optional and a bounded recommendation is used when omitted.",
         {
@@ -23,10 +47,12 @@ function createMcpServer() {
             durationDays: z.number().int().optional().describe("Learning-plan duration in days. Defaults to a configurable 30-day goal period when no exam date or duration is supplied."),
             dailyAvailableHours: z.number().optional().describe("User's daily study capacity within configured bounds. When omitted, the planner uses its bounded configurable recommendation."),
             priorities: z.record(z.string(), z.string()).optional().describe("Optional subject priorities: 'high', 'medium', or 'low'"),
-            planId: z.string().optional().describe("Unique study plan identifier (e.g. as specified by user). Must not be a tool name. Defaults to 'default'")
+            planId: z.string().optional().describe("Optional plan ID only when the user explicitly supplies one. Otherwise StudyPilot generates a unique ID; never use or overwrite 'default' implicitly.")
         },
-        async ({ subjects, examDate, durationDays, dailyAvailableHours, priorities, planId = "default" }) => {
+        async ({ subjects, examDate, durationDays, dailyAvailableHours, priorities, planId: requestedPlanId }) => {
             try {
+                const slug = (subjects[0] || "study").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "study";
+                let planId = requestedPlanId || `${slug}-${randomUUID().slice(0, 8)}`;
                 let parsedPriorities = priorities || {};
                 if (typeof parsedPriorities === "string") {
                     try {
@@ -36,14 +62,7 @@ function createMcpServer() {
                     }
                 }
 
-                const plan = createPlan({
-                    planId,
-                    subjects,
-                    examDate,
-                    durationDays,
-                    dailyAvailableHours,
-                    priorities: parsedPriorities
-                });
+                let plan = createPlan({ planId, subjects, examDate, durationDays, dailyAvailableHours, priorities: parsedPriorities });
 
                 // Guard against malformed subject names before persisting
                 const subjectNames = Object.keys(plan.subjects);
@@ -67,7 +86,17 @@ function createMcpServer() {
                     };
                 }
 
-                savePlan(planId, plan);
+                let saved = saveNewPlan(planId, plan);
+                // A collision on an automatically generated ID is retried. Explicit
+                // IDs are never overwritten; the user must choose a different ID.
+                if (!saved && !requestedPlanId) {
+                    planId = `${slug}-${randomUUID().slice(0, 8)}`;
+                    plan = createPlan({ planId, subjects, examDate, durationDays, dailyAvailableHours, priorities: parsedPriorities });
+                    saved = saveNewPlan(planId, plan);
+                }
+                if (!saved) {
+                    return { isError: true, content: [{ type: "text", text: `A study plan with ID "${planId}" already exists. Nothing was changed. Try creating a new plan without specifying an ID.` }] };
+                }
 
                 const summary = {
                     message: `Study plan "${planId}" created successfully!`,
@@ -125,10 +154,11 @@ function createMcpServer() {
         "get_study_plan",
         "Retrieve and report on an existing saved study plan with progress metrics, remaining hours, exam date, daily availability, and recent session logs. Use this tool when the user asks to retrieve, show, get, view, inspect, or report on a study plan. NEVER use adapt_study_plan for retrieval or report requests.",
         {
-            planId: z.string().optional().describe("Unique identifier of the study plan to retrieve (e.g. 'adaptive-demo'). Must not be a tool name. Defaults to 'default'")
+            planId: z.string().optional().describe("Internal identifier of the plan selected from a verified list, explicit user reference, or active conversation. Omit when no plan is known; do not default to 'default'.")
         },
-        async ({ planId = "default" }) => {
+        async ({ planId }) => {
             try {
+                if (!planId) return { isError: true, content: [{ type: "text", text: "No study plan was selected. List saved plans and choose by subject or plan description." }] };
                 const plan = getPlan(planId);
                 if (!plan) {
                     return {
@@ -199,10 +229,11 @@ function createMcpServer() {
             scheduledHours: z.number().optional().describe("Intended duration of the session in hours. For missed sessions, defaults to missedHours or 2h."),
             notes: z.string().optional().describe("Optional notes or reason for missed session"),
             date: z.string().optional().describe("Date of session in YYYY-MM-DD format (defaults to today)"),
-            planId: z.string().optional().describe("Unique identifier of the study plan to record session into. Must not be a tool name. Defaults to 'default'")
+            planId: z.string().optional().describe("Internal identifier from the active conversation, a verified plan list, or explicit user reference. Never default to another plan.")
         },
-        async ({ subject, hoursSpent, status, missedHours, scheduledHours, notes, date, planId = "default" }) => {
+        async ({ subject, hoursSpent, status, missedHours, scheduledHours, notes, date, planId }) => {
             try {
+                if (!planId) return { isError: true, content: [{ type: "text", text: "No study plan was selected. List saved plans and choose by subject or plan description." }] };
                 const updated = updatePlan(planId, (plan) => {
                     if (!Object.hasOwn(plan.subjects || {}, subject)) {
                         throw new Error(`Subject "${subject}" is not part of study plan "${planId}".`);
@@ -274,13 +305,14 @@ function createMcpServer() {
         "adapt_study_plan",
         "Dynamically re-balance and adapt the remaining study schedule based on actual progress, missed sessions, and remaining days. ONLY invoke when the user explicitly requests to adapt, modify, adjust, re-balance, or recalculate the schedule. NEVER invoke for retrieval, inspection, or report requests ('retrieve', 'show', 'get', 'report on').",
         {
-            planId: z.string().optional().describe("Unique identifier of the study plan to adapt (e.g. 'adaptive-demo'). Must not be a tool name. Defaults to 'default'"),
+            planId: z.string().optional().describe("Internal identifier from the active conversation, a verified plan list, or explicit user reference. Never default to another plan."),
             reason: z.string().optional().describe("Reason for schedule adjustment reflecting user's actual situation and missed sessions. Must NEVER be a retrieval or inspection request."),
             newExamDate: z.string().optional().describe("Optional updated exam date in YYYY-MM-DD format only if explicitly requested to change. Omit entirely if exam date remains unchanged. NEVER populate this with session dates or missed session dates."),
             newDailyAvailableHours: z.number().optional().describe("Optional updated daily study hours capacity only if changing. Omit entirely if daily availability remains unchanged.")
         },
-        async ({ planId = "default", reason, newExamDate, newDailyAvailableHours }) => {
+        async ({ planId, reason, newExamDate, newDailyAvailableHours }) => {
             try {
+                if (!planId) return { isError: true, content: [{ type: "text", text: "No study plan was selected. List saved plans and choose by subject or plan description." }] };
                 const updated = updatePlan(planId, (plan) => {
                     return adaptPlan(plan, {
                         reason: reason || "Progress adaptation and missed session recovery",

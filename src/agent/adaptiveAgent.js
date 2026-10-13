@@ -1,7 +1,7 @@
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
-import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, extractExplicitPlanId } from "./normalizer.js";
+import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, isPlanListingIntent, extractExplicitPlanId, isPlanCreationContinuation } from "./normalizer.js";
 import { validateToolArguments, verifyToolResult } from "./validator.js";
-import { verifyFinalAnswerConsistency, stripMetaPreamble, formatGroundedPlanSummary, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
+import { verifyFinalAnswerConsistency, stripMetaPreamble, formatGroundedPlanSummary, formatGroundedPlanList, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
 
 const MUTATION_TOOLS = new Set(["record_study_session", "create_study_plan", "adapt_study_plan"]);
 
@@ -49,13 +49,14 @@ export class AdaptiveAgent {
      * @param {Array} [params.messages] - Prior conversation turns
      * @returns {Promise<{ success: boolean, reply: string, steps: Array, rounds: number }>}
      */
-    async run({ message, messages = [], allowPartialSuccess, toolTimeoutMs }) {
+    async run({ message, messages = [], activePlanId = null, allowPartialSuccess, toolTimeoutMs }) {
         if (!message && (!messages || messages.length === 0)) {
             throw new Error("A user message or conversation history is required.");
         }
 
         const permitsPartialSuccess = allowPartialSuccess ?? this.allowPartialSuccess;
         const effectiveTimeoutMs = toolTimeoutMs ?? this.toolTimeoutMs;
+        let resolvedActivePlanId = activePlanId;
 
         // 1. Fetch available tools dynamically from MCP client
         const tools = this.mcpClient.listTools();
@@ -83,6 +84,12 @@ export class AdaptiveAgent {
             });
         }
 
+        if (activePlanId) {
+            conversation.splice(1, 0, { role: "system", content: `Verified active study plan ID for this conversation: ${activePlanId}. Use it for plan operations unless the latest user message names another valid plan.` });
+        }
+
+        const createContinuation = isPlanCreationContinuation(message, conversation);
+
         const steps = [];
         const executedTools = [];
         let completed = false;
@@ -94,8 +101,82 @@ export class AdaptiveAgent {
         let lastToolExecutionFailed = false;
         let lastToolFailureReason = "";
 
+        // Plan enumeration is deterministic. Avoid sending a potentially large
+        // catalog back through the model on a later round (and avoid accidental
+        // create/adapt calls for a read-only list request).
+        if (isPlanListingIntent(message)) {
+            const timestamp = new Date().toISOString();
+            steps.push({ type: "tool_executing", tool: "list_study_plans", arguments: {}, timestamp });
+            let listing;
+            try {
+                listing = tools.some(tool => tool.name === "list_study_plans")
+                    ? await this.mcpClient.callTool("list_study_plans", {}, { trustedPlanId: true })
+                    : { isError: true, content: "The StudyPilot plan-listing tool is unavailable." };
+            } catch (error) {
+                listing = { isError: true, content: `Plan listing failed: ${error.message}` };
+            }
+            const verification = verifyToolResult("list_study_plans", {}, listing);
+            let listedData = null;
+            if (verification.valid) {
+                try { listedData = JSON.parse(listing.content); } catch { /* verifier already checked the result */ }
+            }
+            const failed = !verification.valid || !listedData;
+            const content = listing.content || verification.error || "Plan listing returned no data.";
+            executedTools.push({ toolName: "list_study_plans", toolArgs: {}, isError: failed, content, parsedData: listedData });
+            steps.push({ type: "tool_result", tool: "list_study_plans", isError: failed, content, timestamp: new Date().toISOString() });
+            finalReply = failed
+                ? `I couldn't retrieve your saved plans. ${verification.error || content}`
+                : formatGroundedPlanList(listedData);
+            completed = !failed;
+            steps.push({ type: "final_answer", reply: finalReply, success: completed, timestamp: new Date().toISOString() });
+            return {
+                success: completed,
+                partialSuccess: false,
+                reply: finalReply,
+                activePlanId: !failed && listedData.plans.length === 1 ? listedData.plans[0].planId : resolvedActivePlanId,
+                steps,
+                rounds: 0
+            };
+        }
+
+        const hasIncompletePlanIdReference = /\bplan\b.{0,20}\b(?:id|identifier|number)\b/i.test(message || "") && !extractExplicitPlanId(message);
+        if (hasIncompletePlanIdReference && !resolvedActivePlanId) {
+            finalReply = "I couldn't identify which saved plan you mean. Please describe it by subject or goal, and I'll find it without needing you to remember an ID.";
+            completed = false;
+            concluded = true;
+        }
+
+        const needsExistingPlan = !createContinuation && !resolvedActivePlanId &&
+            !concluded &&
+            !extractExplicitPlanId(message) &&
+            (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message));
+        if (needsExistingPlan && tools.some(tool => tool.name === "list_study_plans")) {
+            steps.push({ type: "tool_executing", tool: "list_study_plans", arguments: {}, timestamp: new Date().toISOString() });
+            const listing = await this.mcpClient.callTool("list_study_plans", {}, { trustedPlanId: true });
+            const listingVerification = verifyToolResult("list_study_plans", {}, listing);
+            let listedData = null;
+            if (listingVerification.valid) {
+                try { listedData = JSON.parse(listing.content); } catch { }
+            }
+            const listFailed = !listingVerification.valid || listing.isError || !listedData;
+            executedTools.push({ toolName: "list_study_plans", toolArgs: {}, isError: listFailed, content: listing.content, parsedData: listedData });
+            steps.push({ type: "tool_result", tool: "list_study_plans", isError: listFailed, content: listing.content, timestamp: new Date().toISOString() });
+            if (listFailed) {
+                finalReply = `Action Failed: I could not safely identify your study plan. ${listingVerification.error || listing.content || "Plan listing failed."}`;
+                completed = false;
+                concluded = true;
+            } else if (listedData.plans.length === 0) {
+                finalReply = "I don't see a saved study plan in this conversation yet. Create one first, and I'll keep track of it for you.";
+                completed = false;
+                concluded = true;
+            } else {
+                if (listedData.plans.length === 1) resolvedActivePlanId = listedData.plans[0].planId;
+                conversation.push({ role: "system", content: `Verified saved study plans (internal IDs; never ask the user to repeat an ID): ${JSON.stringify(listedData.plans)}. Select a single matching plan by its subjects or ask the user to choose by subject/description when ambiguous.` });
+            }
+        }
+
         // 3. Bounded Agent Execution Loop
-        for (let round = 1; round <= this.maxRounds; round++) {
+        for (let round = 1; !concluded && round <= this.maxRounds; round++) {
             roundsExecuted = round;
 
             steps.push({
@@ -147,7 +228,7 @@ export class AdaptiveAgent {
                     // Partial outcome: some tools succeeded and some failed in the turn
                     completed = permitsPartialSuccess;
                     const failureLines = turnFailures.map(f => `- Tool "${f.toolName}" failed: ${f.error}`).join("\n");
-                    
+
                     let successSummary = "";
                     const successfulPlan = [...executedTools].reverse().find(t => !t.isError && t.parsedData);
                     if (successfulPlan && successfulPlan.toolName === "create_study_plan") {
@@ -247,6 +328,30 @@ export class AdaptiveAgent {
                 let toolName = call.name;
                 const rawArgs = call.arguments || {};
 
+                // A short selection such as "study plan" answers the assistant's
+                // create-vs-record clarification; it must not be treated as a request
+                // to retrieve an existing plan.
+                if (createContinuation && toolName === "get_study_plan") {
+                    toolName = "create_study_plan";
+                    steps.push({
+                        round,
+                        type: "intent_tool_redirection",
+                        originalTool: "get_study_plan",
+                        redirectedTool: "create_study_plan",
+                        reason: "User selected the previously clarified study-plan creation request.",
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                const isPreviouslyListedId = executedTools.some(item => item.toolName === "list_study_plans" &&
+                    !item.isError && item.parsedData?.plans?.some(plan => plan.planId === rawArgs.planId));
+                if (!resolvedActivePlanId && !extractExplicitPlanId(message) && !isPreviouslyListedId &&
+                    (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message)) &&
+                    toolName === "get_study_plan" && tools.some(tool => tool.name === "list_study_plans")) {
+                    toolName = "list_study_plans";
+                    steps.push({ round, type: "intent_tool_redirection", originalTool: "get_study_plan", redirectedTool: "list_study_plans", reason: "No plan was active or explicitly named, so StudyPilot checked saved plans without guessing an ID.", timestamp: new Date().toISOString() });
+                }
+
                 // Intent-based tool enforcement:
                 // If user intent is retrieval ("retrieve", "get", "show", "inspect", "report on")
                 // but the model incorrectly requested "adapt_study_plan",
@@ -286,6 +391,10 @@ export class AdaptiveAgent {
                     message,
                     messages: conversation,
                     context: conversation,
+                    activePlanId: resolvedActivePlanId,
+                    isPlanCreationContinuation: createContinuation,
+                    verifiedPlanIds: executedTools.filter(item => item.toolName === "list_study_plans" && !item.isError)
+                        .flatMap(item => item.parsedData?.plans?.map(plan => plan.planId) || []),
                     userMessage: message,
                     knownTools: tools.map(t => t.name)
                 });
@@ -334,6 +443,7 @@ export class AdaptiveAgent {
                     conversation.push({
                         role: "tool",
                         tool_name: toolName,
+                        tool_call_id: call.id,
                         content: validationErrMsg
                     });
 
@@ -378,6 +488,7 @@ export class AdaptiveAgent {
                         conversation.push({
                             role: "tool",
                             tool_name: toolName,
+                            tool_call_id: call.id,
                             content: priorSuccess.content
                         });
 
@@ -450,6 +561,12 @@ export class AdaptiveAgent {
                     parsedData
                 });
 
+                if (!executionResult.isError && parsedData?.planId) {
+                    resolvedActivePlanId = parsedData.planId;
+                } else if (!executionResult.isError && toolName === "list_study_plans" && parsedData?.plans?.length === 1) {
+                    resolvedActivePlanId = parsedData.plans[0].planId;
+                }
+
                 steps.push({
                     round,
                     type: "tool_result",
@@ -467,6 +584,7 @@ export class AdaptiveAgent {
                 conversation.push({
                     role: "tool",
                     tool_name: toolName,
+                    tool_call_id: call.id,
                     content: toolContent
                 });
             }
@@ -503,6 +621,7 @@ export class AdaptiveAgent {
             success: finalSuccess,
             partialSuccess: isPartial,
             reply: finalReply,
+            activePlanId: resolvedActivePlanId,
             steps,
             rounds: roundsExecuted
         };
