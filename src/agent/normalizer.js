@@ -280,7 +280,8 @@ export function extractExplicitPlanId(text, conversation = []) {
     const STOP_WORDS = new Set([
         "for", "to", "is", "and", "the", "with", "from", "on", "a", "an", "that", "this",
         "my", "our", "new", "each", "details", "data", "changes", "now", "because",
-        "so", "as", "if", "when", "while", "please", "report", "show", "get", "retrieve"
+        "so", "as", "if", "when", "while", "please", "report", "show", "get", "retrieve",
+        "progress"
     ]);
 
     const searchInText = (t) => {

@@ -520,8 +520,8 @@ export function detectDailyScheduleOverrun(text, maxDailyHours) {
         if (inDailySection || /^[\*\-\•]\s+/.test(line)) {
             // Check for hours in parentheses or colons, e.g. "(3 hours)", ": 1 hour", "(0.5 hrs)"
             const durationMatch = line.match(/\((\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\)/i) ||
-                                  line.match(/[:\-–]\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)(?:\s|$|\))/i) ||
-                                  line.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:of|for|\/day|per day)/i);
+                line.match(/[:\-–]\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)(?:\s|$|\))/i) ||
+                line.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:of|for|\/day|per day)/i);
 
             // Time range like "9:00 - 12:00" or "1:00 - 2:00"
             const timeRangeMatch = line.match(/(\d{1,2}):(\d{2})\s*(?:am|pm)?\s*[\-–]\s*(\d{1,2}):(\d{2})\s*(?:am|pm)?/i);
@@ -962,7 +962,6 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
 
         // Check if reply asserts contradictory or incorrect subject information
         const subjectContradiction = detectIncorrectSubjectInformation(finalReply, data.subjects);
-
         if (subjectContradiction.contradicted || missingSubject || examDateContradiction || examDateOmission || falselyClaimsNoSessions) {
             const reason = subjectContradiction.contradicted
                 ? subjectContradiction.details
