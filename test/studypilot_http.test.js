@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { McpClientManager } from "../src/mcp/mcpClient.js";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const serverScript = path.resolve(testDir, "../studypilot-server/server.js");
@@ -34,6 +35,7 @@ child.stderr.on("data", chunk => { serverOutput += chunk.toString(); });
 
 const client = new Client({ name: "studypilot-http-test-client", version: "1.0.0" });
 const transport = new StreamableHTTPClientTransport(new URL(endpoint));
+const manager = new McpClientManager({ url: endpoint });
 
 try {
     let ready = false;
@@ -46,6 +48,18 @@ try {
         await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.equal(ready, true, `HTTP MCP server did not become ready. Output: ${serverOutput}`);
+    // Verify McpClientManager selects Streamable HTTP and discovers tools.
+    await manager.connect();
+
+    assert.equal(manager.connected, true, "McpClientManager should connect over HTTP");
+
+    const managerTools = await manager.listTools();
+    assert.ok(
+        managerTools.some(tool => tool.name === "get_study_plan"),
+        "McpClientManager should discover tools over HTTP"
+    );
+
+    console.log("✓ McpClientManager Streamable HTTP connection verified");
     try {
         await client.connect(transport);
     } catch (error) {
@@ -86,6 +100,7 @@ try {
 
     console.log("✓ Streamable HTTP MCP initialization, tools/list, tools/call, malformed JSON, and unsupported method verified");
 } finally {
+    await manager.disconnect().catch(() => {});
     await client.close().catch(() => { });
 
     if (child.exitCode === null && child.signalCode === null) {

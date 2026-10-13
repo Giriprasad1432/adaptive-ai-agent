@@ -4,6 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { normalizeToolArguments } from "../agent/normalizer.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,10 +13,11 @@ export class McpClientManager {
     constructor(config = {}) {
         this.clientName = config.name || "adaptive-ai-agent-client";
         this.clientVersion = config.version || "1.0.0";
-        
+        this.url = config.url || process.env.MCP_SERVER_URL || null;
+
         // Connection settings from config or environment
         this.command = config.command || process.env.MCP_SERVER_COMMAND || null;
-        
+
         let args = config.args;
         if (!args && process.env.MCP_SERVER_ARGS) {
             args = process.env.MCP_SERVER_ARGS.trim().split(/\s+/);
@@ -39,7 +41,7 @@ export class McpClientManager {
      * Checks whether an MCP server target has been configured
      */
     isConfigured() {
-        return Boolean(this.command);
+        return Boolean(this.url || this.command);
     }
 
     /**
@@ -97,8 +99,6 @@ export class McpClientManager {
             }
         }
 
-        console.log(`[MCP] Connecting to server: ${this.command} ${resolvedArgs.join(" ")} (cwd: ${serverCwd})`);
-
         try {
             this.client = new Client({
                 name: this.clientName,
@@ -106,16 +106,27 @@ export class McpClientManager {
             });
 
             const appNodeModules = path.resolve(__dirname, "../../node_modules");
-            this.transport = new StdioClientTransport({
-                command: this.command,
-                args: resolvedArgs,
-                cwd: serverCwd,
-                env: {
-                    ...process.env,
-                    NODE_PATH: appNodeModules,
-                    ...(this.env || {})
-                }
-            });
+            if (this.url) {
+                this.transport = new StreamableHTTPClientTransport(
+                    new URL(this.url)
+                );
+
+                console.log(
+                    `[MCP] Connecting to Streamable HTTP server: ${this.url}`
+                );
+            } else {
+                console.log(`[MCP] Connecting to server: ${this.command} ${resolvedArgs.join(" ")} (cwd: ${serverCwd})`);
+                this.transport = new StdioClientTransport({
+                    command: this.command,
+                    args: resolvedArgs,
+                    cwd: serverCwd,
+                    env: {
+                        ...process.env,
+                        NODE_PATH: appNodeModules,
+                        ...(this.env || {})
+                    }
+                });
+            }
 
             await this.client.connect(this.transport);
             this.connected = true;
