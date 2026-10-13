@@ -1,9 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer } from "node:http";
 import { z } from "zod";
 import { getPlan, savePlan, updatePlan } from "./storage.js";
 import { createPlan, recordSession, adaptPlan } from "./planner.js";
 
+function createMcpServer() {
 // Initialize the StudyPilot MCP Server
 const mcp = new McpServer({
     name: "studypilot-mcp-server",
@@ -326,7 +329,83 @@ mcp.tool(
     }
 );
 
-// Connect via StdioServerTransport
-const transport = new StdioServerTransport();
-await mcp.connect(transport);
-console.error("StudyPilot MCP Server is running...");
+    return mcp;
+}
+
+const transportMode = (process.env.MCP_TRANSPORT || "stdio").toLowerCase();
+
+if (transportMode === "stdio") {
+    const mcp = createMcpServer();
+    const transport = new StdioServerTransport();
+    await mcp.connect(transport);
+    console.error("StudyPilot MCP Server is running over stdio...");
+} else if (transportMode === "http") {
+    const host = process.env.MCP_HTTP_HOST || "127.0.0.1";
+    const port = Number(process.env.MCP_HTTP_PORT || 3001);
+    const server = createServer(async (req, res) => {
+        const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+        if (requestUrl.pathname !== "/mcp") {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Not found" }));
+            return;
+        }
+
+        const allowedHosts = new Set([host, `${host}:${port}`]);
+        if (["127.0.0.1", "localhost", "::1"].includes(host)) {
+            for (const allowedHost of ["127.0.0.1", "localhost", "[::1]"]) {
+                allowedHosts.add(allowedHost);
+                allowedHosts.add(`${allowedHost}:${port}`);
+            }
+        }
+        if (!allowedHosts.has(req.headers.host)) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Forbidden host" }));
+            return;
+        }
+
+        if (req.method !== "POST") {
+            res.writeHead(405, { Allow: "POST", "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32000, message: "Method not allowed. Use POST for MCP requests." },
+                id: null
+            }));
+            return;
+        }
+
+        const mcp = createMcpServer();
+        const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+            enableJsonResponse: true
+        });
+        let cleanedUp = false;
+        const cleanup = () => {
+            if (cleanedUp) return;
+            cleanedUp = true;
+            void transport.close();
+            void mcp.close();
+        };
+        res.once("finish", cleanup);
+        res.once("close", cleanup);
+
+        try {
+            await mcp.connect(transport);
+            await transport.handleRequest(req, res);
+        } catch (error) {
+            console.error("[StudyPilot MCP] HTTP request failed:", error);
+            if (!res.headersSent && !res.writableEnded) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    jsonrpc: "2.0",
+                    error: { code: -32603, message: "Internal server error" },
+                    id: null
+                }));
+            }
+        }
+    });
+    server.listen(port, host, () => {
+        console.error(`StudyPilot MCP Streamable HTTP server listening at http://${host}:${port}/mcp`);
+    });
+} else {
+    throw new Error(`Unsupported MCP_TRANSPORT "${transportMode}". Use "stdio" or "http".`);
+}

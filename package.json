@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node test/argument_normalization.test.js && node test/studypilot_mcp.test.js && node test/failure_handling.test.js"
+    "test": "node test/argument_normalization.test.js && node test/studypilot_mcp.test.js && node test/failure_handling.test.js && node test/studypilot_http.test.js"
   },
   "repository": {
     "type": "git",
