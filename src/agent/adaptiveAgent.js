@@ -262,6 +262,20 @@ export class AdaptiveAgent {
                     });
                 }
 
+                // A proposed-date verification is a retrieval query, not a request to
+                // create a plan. Prevent a misclassified model call from mutating data.
+                if (isRetrievalIntent(message) && toolName === "create_study_plan" && !/\b(?:create|make|build|generate)\b/i.test(message)) {
+                    toolName = "get_study_plan";
+                    steps.push({
+                        round,
+                        type: "intent_tool_redirection",
+                        originalTool: "create_study_plan",
+                        redirectedTool: "get_study_plan",
+                        reason: "User asked to verify or retrieve existing plan data, not create a new plan.",
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
                 // Find tool schema
                 const toolDef = tools.find(t => t.name === toolName);
 

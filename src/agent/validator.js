@@ -36,10 +36,20 @@ export function validateToolArguments(tool, args = {}, options = {}) {
     const required = Array.isArray(schema.required) ? schema.required : [];
     const properties = schema.properties || {};
 
+    if (toolName === "get_study_plan" && !args.planId) {
+        const description = String(properties.planId?.description || "");
+        if (!/defaults?\s+to\s+['"]?default\b/i.test(description)) {
+            return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+        }
+    }
+
     // 1. Verify required properties are present
     for (const reqKey of required) {
         const val = args[reqKey];
         if (val === undefined || val === null || val === "") {
+            if (reqKey === "planId" && toolName === "get_study_plan") {
+                return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+            }
             return {
                 valid: false,
                 error: `Missing required parameter "${reqKey}". Expected type: ${properties[reqKey]?.type || "value"}.`

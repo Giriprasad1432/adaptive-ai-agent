@@ -228,7 +228,7 @@ export function tryParseJson(value) {
         }
     }
 
-    if ((trimmed.startsWith("[") && trimmed.endsWith("]")) || 
+    if ((trimmed.startsWith("[") && trimmed.endsWith("]")) ||
         (trimmed.startsWith("{") && trimmed.endsWith("}"))) {
         return parsePythonDictOrRelaxedJson(trimmed);
     }
@@ -277,6 +277,7 @@ export function isToolNameLike(str, knownTools = []) {
  * @returns {string|null} Extracted planId, or null if none found
  */
 export function extractExplicitPlanId(text, conversation = []) {
+    const isDateLikeOrPlaceholder = (value) => /(?:\b\d{4}-\d{2}-\d{2}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(value);
     const STOP_WORDS = new Set([
         "for", "to", "is", "and", "the", "with", "from", "on", "a", "an", "that", "this",
         "my", "our", "new", "each", "details", "data", "changes", "now", "because",
@@ -291,7 +292,7 @@ export function extractExplicitPlanId(text, conversation = []) {
         // e.g. planId "adaptive-demo", planId: adaptive-demo, plan_id='custom-plan'
         const planIdRegex = /\bplan(?:_?id)\s*[:=]?\s*["']?([a-zA-Z0-9_\-]+)["']?/i;
         const match1 = t.match(planIdRegex);
-        if (match1 && match1[1] && !isToolNameLike(match1[1]) && !STOP_WORDS.has(match1[1].toLowerCase())) {
+        if (match1 && match1[1] && !isDateLikeOrPlaceholder(match1[1]) && !isToolNameLike(match1[1]) && !STOP_WORDS.has(match1[1].toLowerCase())) {
             return match1[1];
         }
 
@@ -299,17 +300,17 @@ export function extractExplicitPlanId(text, conversation = []) {
         // e.g. study plan "adaptive-demo", for plan adaptive-demo, in plan "my-plan"
         const planNameRegex = /(?:study\s+plan|study-plan|plan)\s+["']([a-zA-Z0-9_\-]+)["']/i;
         const match2 = t.match(planNameRegex);
-        if (match2 && match2[1] && !isToolNameLike(match2[1]) && !STOP_WORDS.has(match2[1].toLowerCase())) {
+        if (match2 && match2[1] && !isDateLikeOrPlaceholder(match2[1]) && !isToolNameLike(match2[1]) && !STOP_WORDS.has(match2[1].toLowerCase())) {
             return match2[1];
         }
 
         // 3. Verbs / prepositions followed by (study) plan <identifier> (unquoted identifier):
         // e.g. "Retrieve study plan adaptive-demo", "Adapt study plan adaptive-demo", "for study plan custom-123",
         // "Please adapt study plan for plan physics-intensive"
-        const planWordMatches = [...t.matchAll(/(?:(?:retrieve|get|show|view|inspect|report\s+on|adapt|rebalance|modify|update|for|in|from|to|with|of)\s+)?\b(?:study\s+plan|study-plan|plan)\b\s+([a-zA-Z0-9_\-]+)/gi)];
+        const planWordMatches = [...t.matchAll(/(?:(?:retrieve|get|show|view|inspect|report\s+on|adapt|rebalance|modify|update|for|in|from|to|with|of)\s+)?\b(?:study\s+plan|study-plan|plan)\b\s+(?:(?:for|with|named|called)\s+(?:plan\s+)?)?([a-zA-Z0-9_\-]+)/gi)];
         for (const m of planWordMatches) {
             const candidate = m[1];
-            if (candidate && !isToolNameLike(candidate) && !STOP_WORDS.has(candidate.toLowerCase())) {
+            if (candidate && !isDateLikeOrPlaceholder(candidate) && !isToolNameLike(candidate) && !STOP_WORDS.has(candidate.toLowerCase())) {
                 return candidate;
             }
         }
@@ -338,14 +339,12 @@ export function extractExplicitPlanId(text, conversation = []) {
             const fromContent = searchInText(msg.content);
             if (fromContent) return fromContent;
 
-            // Check tool calls in assistant messages
-            if (Array.isArray(msg.tool_calls)) {
-                for (const tc of msg.tool_calls) {
-                    const args = tc.function?.arguments;
-                    const parsedArgs = typeof args === "string" ? tryParseJson(args) : args;
-                    if (parsedArgs && typeof parsedArgs.planId === "string" && parsedArgs.planId.trim() && !isToolNameLike(parsedArgs.planId)) {
-                        return parsedArgs.planId.trim();
-                    }
+            // Only trust IDs in verified tool results. Assistant tool-call arguments are
+            // model proposals and can contain hallucinated identifiers.
+            if (msg.role === "tool" && typeof msg.content === "string") {
+                const result = tryParseJson(msg.content);
+                if (result && typeof result.planId === "string" && result.planId.trim() && !isDateLikeOrPlaceholder(result.planId) && !isToolNameLike(result.planId)) {
+                    return result.planId.trim();
                 }
             }
         }
@@ -380,10 +379,10 @@ export function isUnspecifiedOptionalValue(value) {
 export function hasExplicitPlanRetrievalRequest(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     return /\b(?:retrieve|get|fetch|inspect)\b.*?\b(?:study\s+plan|plan)\b/i.test(text) ||
-           /\b(?:show|display|view)\s+(?:the\s+|my\s+)?(?:full\s+|entire\s+|whole\s+|complete\s+|updated\s+|current\s+|revised\s+|latest\s+)?(?:study\s+plan|plan)\b/i.test(text) ||
-           /\b(?:full|entire|complete|whole)\s+study\s+plan\b/i.test(text) ||
-           /\b(?:report\s+on|report\s+every)\s+(?:subject|study\s+plan)\b/i.test(text) ||
-           /\b(?:subject(?:-wise|-by-subject|\s+wise|\s+by\s+subject)?\s+breakdown|breakdown\s+of\s+all\s+subjects)\b/i.test(text);
+        /\b(?:show|display|view)\s+(?:the\s+|my\s+)?(?:full\s+|entire\s+|whole\s+|complete\s+|updated\s+|current\s+|revised\s+|latest\s+)?(?:study\s+plan|plan)\b/i.test(text) ||
+        /\b(?:full|entire|complete|whole)\s+study\s+plan\b/i.test(text) ||
+        /\b(?:report\s+on|report\s+every)\s+(?:subject|study\s+plan)\b/i.test(text) ||
+        /\b(?:subject(?:-wise|-by-subject|\s+wise|\s+by\s+subject)?\s+breakdown|breakdown\s+of\s+all\s+subjects)\b/i.test(text);
 }
 
 /**
@@ -406,6 +405,9 @@ export function isRetrievalIntent(text) {
     }
 
     const retrievalPatterns = [
+        /\b(?:my|the)\s+exam\s+(?:is\s+on\s+)?(?:date|day)\b/i,
+        /\bmy\s+exam\s+is\s+on\b.*\b(?:right|correct|isn't\s+it|is\s+it)\b/i,
+        /\b(?:is|was)\s+my\s+exam\s+on\b/i,
         /\b(?:retrieve|get|show|display|inspect|view|report\s+on|report\s+every|fetch)\b.*?\b(?:study\s+plan|plan|subject|metric|progress|session)\b/i,
         /\b(?:study\s+plan|plan)\b.*?\b(?:status|details|progress|overview|report|metrics)\b/i,
         /^(?:retrieve|get|show|display|inspect|view|report|fetch)\b/i
@@ -868,9 +870,18 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
             if (isToolName || !currentVal || currentVal === "default") {
                 normalized.planId = userPlanId;
             }
+        } else if ((toolOrSchema?.name || schema?.name) === "get_study_plan") {
+            // Never pass a model-invented ID into retrieval. Honor a documented tool
+            // default only when the tool schema itself explicitly declares it.
+            const planIdDescription = String(properties.planId?.description || "");
+            if (/defaults?\s+to\s+['"]?default\b/i.test(planIdDescription)) {
+                normalized.planId = "default";
+            } else {
+                delete normalized.planId;
+            }
         }
-        // NOTE: If NO explicit userPlanId was provided, but model generated a tool-name like string,
-        // we DO NOT replace it with "default"! We leave it so validation or MCP can reject it honestly.
+        // For retrieval, model-supplied IDs are discarded above unless independently
+        // verified in tool-result context or explicitly provided by the user.
     }
 
     // 8. Reason & Subject Fidelity for adapt_study_plan

@@ -255,7 +255,7 @@ export function extractExplicitExamDates(text) {
  */
 export function isExamDateRequested(userMessage) {
     if (typeof userMessage !== "string" || !userMessage.trim()) return false;
-    return /\b(?:exam\s+date|target\s+exam\s+date|exam\s+day|date\s+of\s+(?:the\s+)?exam|when(?:'s|\s+(?:is|'s))\s+(?:the\s+|my\s+)?exam)\b/i.test(userMessage);
+    return /\b(?:exam\s+date|target\s+exam\s+date|exam\s+day|date\s+of\s+(?:the\s+)?exam|when(?:'s|\s+(?:is|'s))\s+(?:the\s+|my\s+)?exam|my\s+exam\s+is\s+on\s+.+\b(?:right|correct|isn't\s+it)\b)\b/i.test(userMessage);
 }
 
 /**
@@ -369,7 +369,7 @@ export function getRequiredSubjects(subjectsInPlan = [], userMessage = "") {
 
     // Check if user specifically requested a concise summary, progress update, exam date, or hours
     // where individual subject-by-subject breakdowns were not requested.
-    const isNarrowOrConciseQuery = /\b(?:concise|briefly|brief|short|quick|simple|progress|progressing|status|how\s+(?:am\s+i|is\s+it|is\s+my\s+plan)\s+(?:doing|going)|exam\s+date|when(?:'s|\s+(?:is|'s))\s+(?:the\s+|my\s+)?exam|date\s+of\s+(?:the\s+)?exam|remaining\s+hours|hours\s+remaining|how\s+many\s+hours|time\s+remaining|total\s+hours|total\s+remaining|available\s+hours|daily\s+(?:availability|hours)|sessions?)\b/i.test(userMessage);
+    const isNarrowOrConciseQuery = /\b(?:concise|briefly|brief|short|quick|simple|progress|progressing|status|how\s+(?:am\s+i|is\s+it|is\s+my\s+plan)\s+(?:doing|going)|exam\s+date|my\s+exam\s+is\s+on|when(?:'s|\s+(?:is|'s))\s+(?:the\s+|my\s+)?exam|date\s+of\s+(?:the\s+)?exam|remaining\s+hours|hours\s+remaining|how\s+many\s+hours|time\s+remaining|total\s+hours|total\s+remaining|available\s+hours|daily\s+(?:availability|hours)|sessions?)\b/i.test(userMessage);
     if (isNarrowOrConciseQuery) {
         return [];
     }
@@ -703,7 +703,7 @@ export function formatGroundedAdaptationSummary(adaptData) {
  * Reports exam date, daily availability, overall progress, all subjects and their priorities,
  * allocated hours, completed hours, remaining hours, missed hours, and recorded sessions.
  */
-export function formatGroundedRetrievalSummary(planData) {
+export function formatGroundedRetrievalSummary(planData, userMessage = "", options = {}) {
     if (!planData || typeof planData !== "object") return "";
 
     const planId = planData.planId || "default";
@@ -714,6 +714,47 @@ export function formatGroundedRetrievalSummary(planData) {
     const totalCompleted = planData.totalCompletedHours !== undefined ? planData.totalCompletedHours : 0;
     const totalMissed = planData.totalMissedHours !== undefined ? planData.totalMissedHours : 0;
     const totalRemaining = planData.totalRemainingHours !== undefined ? planData.totalRemainingHours : "N/A";
+    const sessionCount = planData.totalSessionsRecorded !== undefined
+        ? planData.totalSessionsRecorded
+        : (Array.isArray(planData.sessions) ? planData.sessions.length : 0);
+    const actualExamDate = normalizeDateToISO(examDate) || examDate;
+    const formatDate = (date) => {
+        const iso = normalizeDateToISO(date);
+        if (!iso) return date;
+        const [year, month, day] = iso.split("-").map(Number);
+        return new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })
+            .format(new Date(Date.UTC(year, month - 1, day)));
+    };
+
+    const proposedDate = extractCanonicalDates(userMessage).find(date => date !== actualExamDate);
+    const conciseExamDateRequest = isExamDateRequested(userMessage) && getRequiredSubjects(Object.keys(planData.subjects || {}), userMessage).length === 0;
+    const conciseProgressRequest = /\bprogress\b/i.test(userMessage) &&
+        !/\b(?:full|entire|all|every|each)\s+subjects?\b|\bsubject[- ](?:wise|by[- ]subject)|\b(?:breakdown|details)\b/i.test(userMessage);
+    if ((options.dateCorrection || proposedDate) && conciseExamDateRequest) {
+        if (proposedDate && actualExamDate !== "N/A") {
+            return `Not quite—your study plan lists ${formatDate(actualExamDate)}, not ${formatDate(proposedDate)}.`;
+        }
+        return `Your exam is scheduled for ${formatDate(actualExamDate)}. You have ${daysRemaining} days remaining.`;
+    }
+    if (options.dateCorrection && conciseProgressRequest) {
+        const allocated = planData.totalAllocatedHours !== undefined ? planData.totalAllocatedHours : (totalCompleted + totalRemaining);
+        const sessionSummary = sessionCount === 0
+            ? " No study sessions have been recorded yet."
+            : ` ${sessionCount} study session${sessionCount === 1 ? " has" : "s have"} been recorded.`;
+        return `Your study plan is at ${overallProgress} progress. You have completed ${totalCompleted} of ${allocated} allocated hours, with ${totalRemaining} hours remaining.${sessionSummary}`;
+    }
+
+    if (conciseExamDateRequest) {
+        return `Your exam is scheduled for ${formatDate(actualExamDate)}. You have ${daysRemaining} days remaining.`;
+    }
+
+    if (conciseProgressRequest) {
+        const allocated = planData.totalAllocatedHours !== undefined ? planData.totalAllocatedHours : (totalCompleted + totalRemaining);
+        const sessionSummary = sessionCount === 0
+            ? " No study sessions have been recorded yet."
+            : ` ${sessionCount} study session${sessionCount === 1 ? " has" : "s have"} been recorded.`;
+        return `Your study plan is at ${overallProgress} progress. You have completed ${totalCompleted} of ${allocated} allocated hours, with ${totalRemaining} hours remaining.${sessionSummary}`;
+    }
 
     const subjects = planData.subjects || {};
     const subjectLines = Object.entries(subjects).map(([sub, info]) => {
@@ -727,9 +768,6 @@ export function formatGroundedRetrievalSummary(planData) {
     });
 
     // Format recorded study sessions
-    const sessionCount = planData.totalSessionsRecorded !== undefined
-        ? planData.totalSessionsRecorded
-        : (Array.isArray(planData.sessions) ? planData.sessions.length : 0);
     const recentSessions = planData.recentSessions || planData.sessions || [];
     const sessionLines = [];
     if (Array.isArray(recentSessions) && recentSessions.length > 0) {
@@ -973,7 +1011,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
             return {
                 valid: false,
                 reason,
-                correctedReply: formatGroundedRetrievalSummary(data)
+                correctedReply: formatGroundedRetrievalSummary(data, userMessage, { dateCorrection: examDateContradiction })
             };
         }
 
@@ -984,7 +1022,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 return {
                     valid: false,
                     reason: `Final reply states total remaining hours as ${totalRemainingCheck.claimedTotal}h, contradicting verified plan-wide total remaining hours of ${data.totalRemainingHours}h.`,
-                    correctedReply: formatGroundedRetrievalSummary(data)
+                    correctedReply: formatGroundedRetrievalSummary(data, userMessage)
                 };
             }
         }
@@ -997,7 +1035,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 return {
                     valid: false,
                     reason: `Final reply falsely claims all recent sessions were completed on "${blanketDateCheck.claimedDate}", but returned history contains sessions on distinct dates (${blanketDateCheck.actualDates.join(", ")}).`,
-                    correctedReply: formatGroundedRetrievalSummary(data)
+                    correctedReply: formatGroundedRetrievalSummary(data, userMessage)
                 };
             }
         }
@@ -1016,7 +1054,23 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 return {
                     valid: false,
                     reason: `Final reply omitted requested field: ${c.field}.`,
-                    correctedReply: formatGroundedRetrievalSummary(data)
+                    correctedReply: formatGroundedRetrievalSummary(data, userMessage)
+                };
+            }
+        }
+
+        const conciseProgressRequest = /\bprogress\b/i.test(userMessage) &&
+            !/\b(?:full|entire|all|every|each)\s+subjects?\b|\bsubject[- ](?:wise|by[- ]subject)|\b(?:breakdown|details)\b/i.test(userMessage);
+        const conciseExamDateRequest = isExamDateRequested(userMessage) && requiredSubjects.length === 0;
+        if (conciseProgressRequest || conciseExamDateRequest) {
+            const conciseReply = formatGroundedRetrievalSummary(data, userMessage);
+            if (finalReply.trim() !== conciseReply) {
+                return {
+                    valid: false,
+                    reason: conciseProgressRequest
+                        ? "Final reply was not a concise, non-repetitive progress summary."
+                        : "Final reply included details beyond the requested exam date.",
+                    correctedReply: conciseReply
                 };
             }
         }
@@ -1040,14 +1094,14 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
             return {
                 valid: false,
                 reason: subjectContradiction.details,
-                correctedReply: formatGroundedRetrievalSummary(parsedData)
+                correctedReply: formatGroundedRetrievalSummary(parsedData, userMessage)
             };
         }
         if (missingSub) {
             return {
                 valid: false,
                 reason: `Final reply omitted subject "${missingSub}" from retrieved plan.`,
-                correctedReply: formatGroundedRetrievalSummary(parsedData)
+                correctedReply: formatGroundedRetrievalSummary(parsedData, userMessage)
             };
         }
         const examDateContradiction = Boolean(parsedData.examDate && isExamDateContradicted(finalReply, parsedData.examDate));
@@ -1061,7 +1115,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
             return {
                 valid: false,
                 reason: `Final reply omitted or contradicted exam date "${parsedData.examDate}".`,
-                correctedReply: formatGroundedRetrievalSummary(parsedData)
+                correctedReply: formatGroundedRetrievalSummary(parsedData, userMessage, { dateCorrection: examDateContradiction })
             };
         }
         if (typeof parsedData.totalRemainingHours === "number") {
@@ -1070,7 +1124,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 return {
                     valid: false,
                     reason: `Final reply states total remaining hours as ${totalRemainingCheck.claimedTotal}h, contradicting verified plan-wide total remaining hours of ${parsedData.totalRemainingHours}h.`,
-                    correctedReply: formatGroundedRetrievalSummary(parsedData)
+                    correctedReply: formatGroundedRetrievalSummary(parsedData, userMessage)
                 };
             }
         }
@@ -1081,7 +1135,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
                 return {
                     valid: false,
                     reason: `Final reply falsely claims all recent sessions were completed on "${blanketDateCheck.claimedDate}", but returned history contains sessions on distinct dates (${blanketDateCheck.actualDates.join(", ")}).`,
-                    correctedReply: formatGroundedRetrievalSummary(parsedData)
+                    correctedReply: formatGroundedRetrievalSummary(parsedData, userMessage)
                 };
             }
         }

@@ -597,6 +597,26 @@ Adjust as needed for your learning style.`
     assert.equal(normGet.planId, "custom-prep-42", "Explicit planId 'custom-prep-42' must be preserved");
     console.log("✓ get_study_plan normalized planId:", normGet.planId);
 
+    // Retrieval IDs must come from explicit user text, verified tool results, or a documented tool default.
+    assert.equal(extractExplicitPlanId("What is my exam date?"), null);
+    assert.equal(extractExplicitPlanId("My exam is on December 15, 2026, right?"), null);
+    assert.equal(extractExplicitPlanId("What is my exam date?", [{ role: "assistant", tool_calls: [{ function: { arguments: { planId: "your_exam_date" } } }] }]), null);
+    assert.equal(extractExplicitPlanId("", [{ role: "tool", content: JSON.stringify({ planId: "default", examDate: "2026-11-30" }) }]), "default");
+    assert.equal(extractExplicitPlanId("", [{ role: "tool", content: JSON.stringify({ planId: "2026-12-15" }) }]), null);
+    assert.equal(extractExplicitPlanId("Get study plan with planId: study_plan"), null);
+    const normUntrustedGet = normalizeToolArguments(getPlanSchema, { planId: "your_exam_date" }, { message: "What is my exam date?" });
+    assert.equal(Object.hasOwn(normUntrustedGet, "planId"), false, "Untrusted model IDs must be removed when no safe default is documented");
+    const defaultPlanSchema = { ...getPlanSchema, inputSchema: { ...getPlanSchema.inputSchema, properties: { planId: { type: "string", description: "Defaults to 'default'" } } } };
+    const normDefaultGet = normalizeToolArguments(defaultPlanSchema, { planId: "2026-12-15" }, { message: "What is my exam date?" });
+    assert.equal(normDefaultGet.planId, "default", "Documented default plan ID must replace model-invented date-like IDs");
+    const missingIdValidation = validateToolArguments(getPlanSchema, normUntrustedGet);
+    assert.match(missingIdValidation.error, /provide the plan ID/i, "Missing safe plan ID must request clarification");
+    assert.equal(isRetrievalIntent("How is my study plan progress?"), true);
+    assert.equal(isRetrievalIntent("My exam is on December 15, 2026, right?"), true);
+    assert.equal(isExamDateRequested("My exam is on December 15, 2026, right?"), true);
+    assert.match(formatGroundedRetrievalSummary({ planId: "default", overallProgress: "19%", totalCompletedHours: 28, totalRemainingHours: 119, totalAllocatedHours: 147, subjects: { Mathematics: { allocatedHours: 88, completedHours: 28, remainingHours: 60, missedHours: 0, priority: "high" } } }, "How is my study plan progress?"), /19% progress.*28 of 147 allocated hours.*119 hours remaining/);
+    assert.doesNotMatch(formatGroundedRetrievalSummary({ planId: "default", overallProgress: "19%", totalCompletedHours: 28, totalRemainingHours: 119, subjects: { Mathematics: { allocatedHours: 88, completedHours: 28, remainingHours: 60, missedHours: 0, priority: "high" } } }, "How is my study plan progress?"), /Mathematics/);
+
     // 9.4 Regression: adapt_study_plan preserves explicit planId when model outputs adapt_study_plan
     console.log("\n[Test 9.4] Regression: adapt_study_plan preserves explicit planId when model generates tool name");
     const rawAdaptArgsWithToolName = {
@@ -2325,7 +2345,7 @@ The most recent sessions were all completed on October 12, 2026.
     const checkOmittedRequestedExamDate = verifyFinalAnswerConsistency(livePostmanReply, executedExamDateTools, examDateRequestedPrompt);
     assert.equal(checkOmittedRequestedExamDate.valid, false, "Omission of exam date when explicitly requested by user must fail consistency check");
     assert.ok(checkOmittedRequestedExamDate.reason.includes("exam date"), "Reason must identify omitted exam date");
-    assert.ok(checkOmittedRequestedExamDate.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date 2026-11-30");
+    assert.ok(checkOmittedRequestedExamDate.correctedReply.includes("November 30, 2026"), "Corrected reply must provide grounded exam date");
 
     // 18.4: A conflicting exam date must fail consistency check
     const conflictingExamDateReply = `Study Plan Details: "mutation-test-oct12"
@@ -2338,7 +2358,7 @@ The most recent sessions were all completed on October 12, 2026.
     const checkConflictingExamDate = verifyFinalAnswerConsistency(conflictingExamDateReply, executedExamDateTools, "Show me my study plan");
     assert.equal(checkConflictingExamDate.valid, false, "Reply with conflicting exam date must fail consistency check");
     assert.ok(checkConflictingExamDate.reason.includes("exam date"), "Reason must cite exam date contradiction");
-    assert.ok(checkConflictingExamDate.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date 2026-11-30");
+    assert.ok(checkConflictingExamDate.correctedReply.includes("2026-11-30"), "Full-plan correction must preserve grounded exam date");
 
     // 18.5: A retrieval answer that still has incorrect total remaining hours (even without exam date) must fail
     const wrongHoursNoExamDateReply = "The total remaining hours for the entire plan are 60.2 hours. The total remaining hours for each subject are: Mathematics: 60.2 hours; Physics: 58.8 hours.";
@@ -2385,14 +2405,14 @@ The most recent sessions were all completed on October 12, 2026.
     }];
 
     // 19.1 Concise progress summary without the exam date or subject-by-subject breakdown (Reproduction fix)
-    const conciseProgressPrompt = "Briefly tell me how my study plan is progressing. Keep it concise. Use planId default.";
-    const conciseProgressReply = "You are making steady progress on your study plan with 28 completed hours out of 147 total hours, leaving 119 remaining hours.";
+    const conciseProgressPrompt = "How is my study plan progress?";
+    const conciseProgressReply = "Your study plan is at 19% progress. You have completed 28 of 147 allocated hours, with 119 hours remaining. 1 study session has been recorded.";
     const checkConciseProgress = verifyFinalAnswerConsistency(conciseProgressReply, executedSection19Tools, conciseProgressPrompt);
     assert.equal(checkConciseProgress.valid, true, "Concise progress summary without exam date or subject breakdown must pass consistency check without false positive");
 
     // 19.2 Exam-date-only request returning the correct date without a full-plan dump
     const examDateOnlyPrompt = "What is my exam date for plan default?";
-    const examDateOnlyReply = "Your exam date for plan default is November 30, 2026.";
+    const examDateOnlyReply = "Your exam is scheduled for November 30, 2026. You have 49 days remaining.";
     const checkExamDateOnly = verifyFinalAnswerConsistency(examDateOnlyReply, executedSection19Tools, examDateOnlyPrompt);
     assert.equal(checkExamDateOnly.valid, true, "Exam-date-only request with correct exam date must pass without requiring subjects or dumping the full plan");
 
@@ -2401,14 +2421,15 @@ The most recent sessions were all completed on October 12, 2026.
     const checkOmittedDateOnRequest = verifyFinalAnswerConsistency(omittedDateReply, executedSection19Tools, examDateOnlyPrompt);
     assert.equal(checkOmittedDateOnRequest.valid, false, "Response omitting explicitly requested exam date must fail consistency check");
     assert.ok(checkOmittedDateOnRequest.reason.includes("exam date"), "Reason must identify omitted exam date");
-    assert.ok(checkOmittedDateOnRequest.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date");
+    assert.ok(checkOmittedDateOnRequest.correctedReply.includes("November 30, 2026"), "Corrected reply must provide grounded exam date");
 
     // 19.4 Incorrect exam date in a response
     const wrongDateReply = "Your exam is scheduled for December 25, 2026.";
     const checkWrongDate = verifyFinalAnswerConsistency(wrongDateReply, executedSection19Tools, conciseProgressPrompt);
     assert.equal(checkWrongDate.valid, false, "Response with contradictory exam date must fail consistency check");
     assert.ok(checkWrongDate.reason.includes("exam date"), "Reason must cite exam date contradiction");
-    assert.ok(checkWrongDate.correctedReply.includes("2026-11-30"), "Corrected reply must provide grounded exam date");
+    assert.match(checkWrongDate.correctedReply, /19% progress/);
+    assert.doesNotMatch(checkWrongDate.correctedReply, /December 25, 2026|Subject Breakdown/);
 
     // 19.5 Incorrect subject information in a response
     // 19.5a Contradictory subject priority
@@ -2417,7 +2438,8 @@ The most recent sessions were all completed on October 12, 2026.
     assert.equal(checkWrongPriority.valid, false, "Response asserting contradictory subject priority must fail consistency check");
     assert.ok(checkWrongPriority.reason.includes("Mathematics"), "Reason must cite conflicting subject");
     assert.ok(checkWrongPriority.reason.includes("priority"), "Reason must cite priority contradiction");
-    assert.ok(checkWrongPriority.correctedReply.includes("HIGH Priority"), "Corrected reply must restore verified priority");
+    assert.match(checkWrongPriority.correctedReply, /19%|28 of 147/, "Progress correction must restore verified plan totals concisely");
+    assert.doesNotMatch(checkWrongPriority.correctedReply, /HIGH Priority|Mathematics|Physics/);
 
     // 19.5b Fabricated / Nonexistent subject claimed in study plan
     const fabricatedSubjectReply = "You are progressing well. Your plan includes History (high priority) with 30 hours.";
@@ -2452,7 +2474,7 @@ The most recent sessions were all completed on October 12, 2026.
             this.callCount++;
             if (this.callCount === 1) {
                 return {
-                    toolCalls: [{ name: "get_study_plan", arguments: { planId: "default" } }],
+                    toolCalls: [{ name: "get_study_plan", arguments: { planId: "your_exam_date" } }],
                     content: ""
                 };
             }
@@ -2462,9 +2484,13 @@ The most recent sessions were all completed on October 12, 2026.
             };
         }
     };
+    let conciseRetrievalArgs;
     const mockMcpForSection19 = {
-        listTools: () => [{ name: "get_study_plan", inputSchema: { type: "object", properties: { planId: { type: "string" } } } }],
-        callTool: async () => ({ isError: false, content: JSON.stringify(mockPlanForSection19) })
+        listTools: () => [{
+            name: "get_study_plan",
+            inputSchema: { type: "object", properties: { planId: { type: "string", description: "Defaults to 'default'" } } }
+        }],
+        callTool: async (_name, args) => { conciseRetrievalArgs = args; return { isError: false, content: JSON.stringify(mockPlanForSection19) }; }
     };
     const conciseAgent = new AdaptiveAgent({
         provider: conciseAgentProvider,
@@ -2473,8 +2499,68 @@ The most recent sessions were all completed on October 12, 2026.
     });
     const conciseAgentRes = await conciseAgent.run({ message: conciseProgressPrompt });
     assert.equal(conciseAgentRes.success, true, "Agent run must succeed");
-    assert.equal(conciseAgentRes.reply, conciseProgressReply, "Concise answer must be preserved directly without full plan dump replacement");
+    assert.equal(conciseAgentRes.reply, conciseProgressReply, "Concise answer must be grounded and non-repetitive");
+    assert.equal(conciseRetrievalArgs.planId, "default", "Progress retrieval must use the tool-documented existing default plan, never the model's date-like ID");
     assert.ok(!conciseAgentRes.steps.some(s => s.type === "final_answer_grounded"), "Agent must NOT trigger final_answer_grounded for concise progress reply");
+
+    const examDateAgentProvider = {
+        callCount: 0,
+        async chat() {
+            this.callCount++;
+            return this.callCount === 1
+                ? { toolCalls: [{ name: "create_study_plan", arguments: { planId: "2026-12-15", examDate: "2026-12-15", subjects: ["Mathematics"] } }], content: "" }
+                : { toolCalls: [], content: "No. Your plan lists November 30, 2026." };
+        }
+    };
+    const examDateAgent = new AdaptiveAgent({ provider: examDateAgentProvider, mcpClient: mockMcpForSection19, maxRounds: 3 });
+    const examDateAgentRes = await examDateAgent.run({ message: "My exam is on December 15, 2026, right?" });
+    assert.equal(examDateAgentRes.success, true, "Exam-date verification must retrieve and compare against existing plan data");
+    assert.ok(examDateAgentRes.steps.some(step => step.type === "intent_tool_redirection" && step.redirectedTool === "get_study_plan"), "Proposed-date verification must not create a plan");
+    assert.equal(conciseRetrievalArgs.planId, "default", "Proposed exam date must never be used as planId");
+    assert.match(examDateAgentRes.reply, /November 30, 2026/);
+    assert.equal(examDateAgentRes.reply, "Not quite—your study plan lists November 30, 2026, not December 15, 2026.");
+
+    const zeroProgressPlan = {
+        ...mockPlanForSection19,
+        overallProgress: "0%",
+        totalCompletedHours: 0,
+        totalAllocatedHours: 147,
+        totalRemainingHours: 147,
+        totalSessionsRecorded: 0,
+        recentSessions: [],
+        subjects: {
+            Mathematics: { allocatedHours: 88, completedHours: 0, remainingHours: 88, missedHours: 0, priority: "high", progressPercentage: 0 },
+            Physics: { allocatedHours: 59, completedHours: 0, remainingHours: 59, missedHours: 0, priority: "medium", progressPercentage: 0 }
+        }
+    };
+    const zeroProgressTools = [{ toolName: "get_study_plan", toolArgs: { planId: "default" }, isError: false, parsedData: zeroProgressPlan }];
+    const zeroProgressCorrection = verifyFinalAnswerConsistency(
+        "Mathematics is low priority.",
+        zeroProgressTools,
+        "How is my study plan progress?"
+    );
+    assert.equal(zeroProgressCorrection.valid, false);
+    assert.equal(zeroProgressCorrection.correctedReply, "Your study plan is at 0% progress. You have completed 0 of 147 allocated hours, with 147 hours remaining. No study sessions have been recorded yet.");
+    assert.doesNotMatch(zeroProgressCorrection.correctedReply, /Physics|Mathematics|recommend|should|could/i);
+
+    const exactExamDateTools = [{ toolName: "get_study_plan", toolArgs: { planId: "default" }, isError: false, parsedData: { ...zeroProgressPlan, daysRemaining: 49 } }];
+    const wrongGeneratedDate = verifyFinalAnswerConsistency(
+        "Your exam date is December 30, 2026.",
+        exactExamDateTools,
+        "What is my exam date?"
+    );
+    assert.equal(wrongGeneratedDate.valid, false);
+    assert.equal(wrongGeneratedDate.correctedReply, "Your exam is scheduled for November 30, 2026. You have 49 days remaining.");
+    assert.doesNotMatch(wrongGeneratedDate.correctedReply, /December 30|Mathematics|Physics/);
+
+    const proposedDateCorrection = verifyFinalAnswerConsistency(
+        "Your exam date is December 30, 2026.",
+        exactExamDateTools,
+        "My exam is on December 15, 2026, right?"
+    );
+    assert.equal(proposedDateCorrection.valid, false);
+    assert.equal(proposedDateCorrection.correctedReply, "Not quite—your study plan lists November 30, 2026, not December 15, 2026.");
+    assert.doesNotMatch(proposedDateCorrection.correctedReply, /December 30|Subject Breakdown|Mathematics|Physics/);
 
     // 19.8 Mixed-intent subject breakdown requests vs concise and single-subject requests
     const mixedBreakdownPrompt = "Show my progress and the full subject-wise breakdown";
@@ -2596,7 +2682,7 @@ The most recent sessions were all completed on October 12, 2026.
     const checkLiteralWrongDate = verifyFinalAnswerConsistency(literalWrongDateReply, executedSection19Tools, "When is my exam?");
     assert.equal(checkLiteralWrongDate.valid, false, "Literal 2026-12-15 in response must fail verifyFinalAnswerConsistency");
     assert.ok(checkLiteralWrongDate.reason.includes("exam date"), "Reason must cite exam date contradiction");
-    assert.ok(checkLiteralWrongDate.correctedReply.includes("2026-11-30"), "Corrected reply must restore verified 2026-11-30 date");
+    assert.ok(checkLiteralWrongDate.correctedReply.includes("November 30, 2026"), "Corrected reply must restore verified date");
 
     // 20.3 Ambiguous & conflicting user requests: conflicting scope in prompt
     // When prompt contains both single-subject instruction and full breakdown instruction,
@@ -2881,7 +2967,9 @@ The most recent sessions were all completed on October 12, 2026.
     assert.equal(isRetrievalIntent(prompt5), true, "P5 must be retrieval intent");
     assert.equal(hasExplicitPlanRetrievalRequest(prompt5), true, "P5 explicitly requests plan retrieval");
     const p5CheckSuccess = verifyFinalAnswerConsistency(groundedRetrievalReply, section21RetrievalTools, prompt5);
-    assert.equal(p5CheckSuccess.valid, true, "P5 must pass with get_study_plan");
+    assert.equal(p5CheckSuccess.valid, false, "P5 full subject dump must be reduced for a concise progress request");
+    assert.match(p5CheckSuccess.correctedReply, /progress.*completed.*remaining/i);
+    assert.doesNotMatch(p5CheckSuccess.correctedReply, /Subject Breakdown|Mathematics|Physics|Chemistry/);
 
     console.log("✓ Section 21 verified: Session-recording grounding, disambiguation & combined intent regression tests passed");
 
