@@ -179,7 +179,9 @@ export class AdaptiveAgent {
                             steps.push({
                                 round,
                                 type: "final_answer_grounded",
-                                originalReply,
+                                originalReply: consistencyCheck.redactOriginalReply
+                                    ? "[omitted: unsupported exam-date claim]"
+                                    : originalReply,
                                 correctedReply: finalReply,
                                 reason: consistencyCheck.reason,
                                 timestamp: new Date().toISOString()
@@ -394,7 +396,9 @@ export class AdaptiveAgent {
 
                 let executionResult;
                 try {
-                    const callOptions = typeof effectiveTimeoutMs === "number" ? { timeout: effectiveTimeoutMs } : {};
+                    const callOptions = typeof effectiveTimeoutMs === "number"
+                        ? { timeout: effectiveTimeoutMs, trustedPlanId: true }
+                        : { trustedPlanId: true };
                     executionResult = await this.mcpClient.callTool(toolName, toolArgs, callOptions);
                 } catch (callError) {
                     executionResult = {

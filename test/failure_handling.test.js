@@ -63,22 +63,22 @@ async function runFailureHandlingSuite() {
     console.log("--- SCENARIO 1: Invalid or Missing Exam Date ---");
     console.log("=======================================================");
 
-    // 1.1 Tool Result: Missing exam date via MCP tool call
-    console.log("\n[Scenario 1.1] Tool Result: Missing examDate rejected by tool");
+    // 1.1 Goal-based plans accept an omitted exam date and use a duration fallback.
+    console.log("\n[Scenario 1.1] Goal-based plan creation without examDate");
     const missingDateToolResult = await mcpClient.callTool({
         name: "create_study_plan",
         arguments: {
+            planId: "goal-without-exam-date",
             subjects: ["Mathematics", "Physics"],
             dailyAvailableHours: 3
         }
     });
-    assert.equal(Boolean(missingDateToolResult.isError), true, "Missing examDate must result in isError: true");
-    const missingDateText = missingDateToolResult.content?.[0]?.text || "";
-    assert.ok(
-        missingDateText.toLowerCase().includes("examdate") || missingDateText.toLowerCase().includes("invalid"),
-        `Error message must indicate missing/invalid examDate. Received: "${missingDateText}"`
-    );
-    console.log(`✓ Tool result verified: isError=true, error message: "${missingDateText}"`);
+    assert.equal(Boolean(missingDateToolResult.isError), false, "Goal-based plan without examDate must succeed");
+    const goalData = JSON.parse(missingDateToolResult.content?.[0]?.text || "{}");
+    assert.equal(goalData.examDate, null);
+    assert.equal(goalData.planningMode, "goal");
+    assert.ok(goalData.durationDays > 0);
+    console.log(`✓ Goal plan saved without an exam date for ${goalData.durationDays} days`);
 
     // 1.2 Tool Result: Invalid exam date format via MCP tool call
     console.log("\n[Scenario 1.2] Tool Result: Invalid examDate format ('not-a-date') rejected by tool");
@@ -111,8 +111,8 @@ async function runFailureHandlingSuite() {
     assert.equal(Boolean(slashDateToolResult.isError), true, "Slash date format must return isError: true");
     console.log(`✓ Tool result verified: isError=true for non YYYY-MM-DD date`);
 
-    // 1.4 Agent Response & Status: Missing examDate handled safely without fabricating plan
-    console.log("\n[Scenario 1.4] Agent Response: Missing examDate results in honest failure, no fabricated plan");
+    // 1.4 Agent creates a goal-based plan when no exam date was requested.
+    console.log("\n[Scenario 1.4] Agent creates a goal plan without fabricating an exam date");
     const missingDateProvider = {
         turn: 0,
         async chat() {
@@ -132,10 +132,10 @@ async function runFailureHandlingSuite() {
                     content: "Let me create a study plan."
                 };
             }
-            // Model attempts to invent a successful plan despite missing exam date
+            // Use a deterministic, grounded goal-plan response.
             return {
                 toolCalls: [],
-                content: "Here is your study plan: Mathematics (60 hours), Physics (40 hours). Daily schedule: 3 hours/day."
+                content: "I created the Mathematics and Physics plan using 3 hours per day and a 30-day goal period."
             };
         }
     };
@@ -150,26 +150,11 @@ async function runFailureHandlingSuite() {
         message: "Create a study plan for Mathematics and Physics with 3 hours per day."
     });
 
-    // Verify Success/Failure status
-    assert.equal(missingDateAgentResult.success, false, "Agent success status must be false when examDate is missing");
-    // Verify Agent response
-    assert.ok(
-        missingDateAgentResult.reply.startsWith("Action Failed:"),
-        `Agent reply must start with 'Action Failed:'. Received: "${missingDateAgentResult.reply}"`
-    );
-    assert.ok(
-        missingDateAgentResult.reply.includes("examDate"),
-        `Agent reply must clearly state the missing examDate parameter. Received: "${missingDateAgentResult.reply}"`
-    );
-    assert.ok(
-        !missingDateAgentResult.reply.includes("Mathematics (60 hours)"),
-        "Agent must NOT return fabricated subject allocations"
-    );
-    assert.ok(
-        !missingDateAgentResult.reply.includes("Here is your study plan"),
-        "Agent must NOT claim a study plan was created"
-    );
-    console.log("✓ Agent response verified: success=false, honest failure explanation, zero fabricated allocations");
+    assert.equal(missingDateAgentResult.success, true, "Goal plan creation must not require an exam date");
+    assert.match(missingDateAgentResult.reply, /30 days/i);
+    assert.match(missingDateAgentResult.reply, /recommended/i);
+    assert.doesNotMatch(missingDateAgentResult.reply, /2024-12-31|exam date/i);
+    console.log("✓ Agent created a goal-based plan without inserting an exam date");
 
     // 1.5 Agent Response & Status: Invalid date format ('invalid-date') handled safely
     console.log("\n[Scenario 1.5] Agent Response: Invalid date format ('invalid-date') results in honest failure");
@@ -690,12 +675,12 @@ async function runFailureHandlingSuite() {
                 return {
                     toolCalls: [
                         {
-                            // Call 1: FAILS (invalid date format)
+                            // Call 1: FAILS (invalid priority)
                             name: "create_study_plan",
                             arguments: {
                                 subjects: ["Biology"],
-                                examDate: "not-a-date",
                                 dailyAvailableHours: 2,
+                                priorities: { Biology: "urgent" },
                                 planId: `failed_first_${Date.now()}`
                             }
                         },
@@ -741,7 +726,7 @@ async function runFailureHandlingSuite() {
         `Reply must start with 'Action Partially Completed:'. Received: "${orderAResultDefault.reply}"`
     );
     assert.ok(
-        orderAResultDefault.reply.includes("not-a-date") || orderAResultDefault.reply.includes("YYYY-MM-DD"),
+        orderAResultDefault.reply.includes("urgent") || orderAResultDefault.reply.includes("Invalid priority"),
         "Reply must surface the failure of Call 1 and not hide it behind Call 2"
     );
     assert.ok(
@@ -786,12 +771,12 @@ async function runFailureHandlingSuite() {
                             }
                         },
                         {
-                            // Call 2: FAILS (invalid date format)
+                            // Call 2: FAILS (invalid priority)
                             name: "create_study_plan",
                             arguments: {
                                 subjects: ["Biology"],
-                                examDate: "not-a-date",
                                 dailyAvailableHours: 2,
+                                priorities: { Biology: "urgent" },
                                 planId: `failed_second_${Date.now()}`
                             }
                         }
@@ -821,7 +806,7 @@ async function runFailureHandlingSuite() {
     assert.equal(orderBResultDefault.partialSuccess, true, "partialSuccess must be true");
     assert.ok(orderBResultDefault.reply.startsWith("Action Partially Completed:"), "Reply must start with 'Action Partially Completed:'");
     assert.ok(
-        orderBResultDefault.reply.includes("not-a-date") || orderBResultDefault.reply.includes("YYYY-MM-DD"),
+        orderBResultDefault.reply.includes("urgent") || orderBResultDefault.reply.includes("Invalid priority"),
         "Reply must surface the failure of Call 2"
     );
     assert.ok(

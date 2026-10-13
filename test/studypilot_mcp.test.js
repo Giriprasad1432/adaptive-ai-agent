@@ -84,6 +84,11 @@ async function runDeterministicTests() {
         assert.ok(createData.subjectAllocations.Mathematics, "Mathematics should be allocated");
         assert.ok(createData.subjectAllocations.Physics, "Physics should be allocated");
         assert.ok(createData.subjectAllocations.Chemistry, "Chemistry should be allocated");
+        assert.equal(createData.totalCompletedHours, 0, "A newly created plan has no completed hours");
+        assert.equal(createData.overallProgressPercentage, 0, "A newly created plan starts at 0% progress");
+        assert.ok(createData.totalRemainingHours > 0, "A newly created plan retains uncompleted allocated hours");
+        assert.equal(createData.subjectAllocations.Mathematics.completedHours, 0);
+        assert.equal(createData.subjectAllocations.Mathematics.progressPercentage, 0);
         assert.ok(
             createData.subjectAllocations.Mathematics.allocatedHours > createData.subjectAllocations.Chemistry.allocatedHours,
             "High priority subject (Math) should receive more hours than low priority (Chemistry)"

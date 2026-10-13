@@ -1,7 +1,11 @@
 /**
  * Tool argument validation and result verification helpers
  */
-import { isToolNameLike, isRetrievalIntent, isAdaptationIntent } from "./normalizer.js";
+import { extractExplicitPlanId, extractExplicitSessionDate, extractExplicitMissedSessionHours, isToolNameLike, isRetrievalIntent, isAdaptationIntent } from "./normalizer.js";
+import { getDailyStudyHourBounds } from "../../studypilot-server/planner.js";
+
+const isPlaceholderPlanId = value => typeof value === "string" &&
+    /^(?:id|identifier|number|name|plan|plan[\s_-]*id|study[\s_-]*plan|unknown|unspecified)$/i.test(value.trim());
 
 /**
  * Validates normalized arguments against an MCP tool's inputSchema.
@@ -36,10 +40,54 @@ export function validateToolArguments(tool, args = {}, options = {}) {
     const required = Array.isArray(schema.required) ? schema.required : [];
     const properties = schema.properties || {};
 
-    if (toolName === "get_study_plan" && !args.planId) {
-        const description = String(properties.planId?.description || "");
-        if (!/defaults?\s+to\s+['"]?default\b/i.test(description)) {
-            return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+    const userExplicitlyRequestedPlanId = typeof options.userMessage === "string" &&
+        /\bplan\b.{0,20}\b(?:id|identifier|number)\b/i.test(options.userMessage);
+    const explicitUserPlanId = userExplicitlyRequestedPlanId
+        ? extractExplicitPlanId(options.userMessage)
+        : null;
+
+    if (args.planId && isPlaceholderPlanId(args.planId)) {
+        return { valid: false, error: 'The plan ID is a label or placeholder, not a specific plan. Please provide the actual plan ID.' };
+    }
+
+    if (properties.planId && userExplicitlyRequestedPlanId && (!explicitUserPlanId || args.planId !== explicitUserPlanId)) {
+        return { valid: false, error: 'I could not safely resolve the requested plan ID. Please provide the plan ID.' };
+    }
+
+    if (toolName === "get_study_plan" && !args.planId && !/defaults?\s+to\s+['"]?default\b/i.test(String(properties.planId?.description || ""))) {
+        return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+    }
+
+    if (((toolName === "adapt_study_plan" && options.userMessage && isAdaptationIntent(options.userMessage)) ||
+        (toolName === "record_study_session" && options.userMessage)) && !args.planId) {
+        return { valid: false, error: 'I could not identify a verified study plan ID from this request or prior tool results. Please provide the plan ID.' };
+    }
+
+    if (toolName === "create_study_plan" && options.userMessage &&
+        /\b(?:exam|test)\b.{0,45}\b(?:prep|preparation|revision|plan|schedule)\b|\b(?:prep|preparation|revision)\b.{0,45}\b(?:exam|test)\b/i.test(options.userMessage) &&
+        !args.examDate) {
+        return { valid: false, error: "Please provide the exam date for this exam-preparation plan, or describe it as a goal-based learning plan." };
+    }
+
+    if (toolName === "record_study_session" && options.userMessage) {
+        const explicitSessionDate = extractExplicitSessionDate(options.userMessage);
+        if (explicitSessionDate && args.date !== explicitSessionDate) {
+            return { valid: false, error: `The session date must match the explicit date in your request (${explicitSessionDate}).` };
+        }
+        if (String(args.status || "").toLowerCase() === "missed") {
+            if (args.hoursSpent !== 0) {
+                return { valid: false, error: "hoursSpent must be 0 for a missed session because no study occurred." };
+            }
+            const explicitHours = extractExplicitMissedSessionHours(options.userMessage);
+            if (explicitHours.missedHours !== null && args.missedHours !== explicitHours.missedHours) {
+                return { valid: false, error: `missedHours must match the requested missed duration (${explicitHours.missedHours}).` };
+            }
+            if (explicitHours.scheduledHours !== null && args.scheduledHours !== explicitHours.scheduledHours) {
+                return { valid: false, error: `scheduledHours must match the requested session duration (${explicitHours.scheduledHours}).` };
+            }
+        }
+        if (args.missedHours !== undefined && args.scheduledHours !== undefined && args.missedHours > args.scheduledHours) {
+            return { valid: false, error: "missedHours cannot exceed scheduledHours." };
         }
     }
 
@@ -146,6 +194,18 @@ export function validateToolArguments(tool, args = {}, options = {}) {
                     error: `Parameter "${key}" must be an integer.`
                 };
             }
+            if (key === "durationDays") {
+                const maxDuration = Number(process.env.STUDYPILOT_MAX_DURATION_DAYS || 730);
+                if (value < 1 || value > maxDuration) {
+                    return { valid: false, error: `Parameter "durationDays" must be a whole number between 1 and ${maxDuration}.` };
+                }
+            }
+            if (["dailyAvailableHours", "newDailyAvailableHours"].includes(key)) {
+                const { min, max } = getDailyStudyHourBounds();
+                if (value < min || value > max) {
+                    return { valid: false, error: `Parameter "${key}" must be a positive number greater than 0 and between ${min} and ${max} hours.` };
+                }
+            }
             if (key === "hoursSpent") {
                 if (value < 0) {
                     return {
@@ -176,6 +236,11 @@ export function validateToolArguments(tool, args = {}, options = {}) {
                         valid: false,
                         error: `Parameter "${key}" must be a valid date in YYYY-MM-DD format. Received: "${value}".`
                     };
+                }
+                const [calendarYear, calendarMonth, calendarDay] = value.split("-").map(Number);
+                const parsedDate = new Date(Date.UTC(calendarYear, calendarMonth - 1, calendarDay));
+                if (parsedDate.getUTCFullYear() !== calendarYear || parsedDate.getUTCMonth() !== calendarMonth - 1 || parsedDate.getUTCDate() !== calendarDay) {
+                    return { valid: false, error: `Parameter "${key}" must be a real calendar date in YYYY-MM-DD format. Received: "${value}".` };
                 }
                 if (key === "examDate" || key === "newExamDate") {
                     const [y, m, d] = value.trim().split("-").map(Number);
@@ -248,6 +313,13 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
             return {
                 valid: false,
                 error: "create_study_plan did not return a valid structured summary."
+            };
+        }
+
+        if (toolArgs.planId && data.planId !== toolArgs.planId) {
+            return {
+                valid: false,
+                error: `create_study_plan returned plan ID "${data.planId || "(missing)"}" instead of requested ID "${toolArgs.planId}".`
             };
         }
 
@@ -329,6 +401,12 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
                 error: "record_study_session result is missing updated subject progress."
             };
         }
+        if (toolArgs.planId && data.planId !== toolArgs.planId) {
+            return {
+                valid: false,
+                error: `record_study_session returned plan ID "${data.planId || "(missing)"}" instead of requested ID "${toolArgs.planId}".`
+            };
+        }
         // Verify recorded subject matches requested subject
         if (toolArgs.subject && data.session.subject) {
             const expectedSub = toolArgs.subject.trim().toLowerCase();
@@ -349,6 +427,24 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
                 };
             }
         }
+
+        const matchesRequestedHours = (field, expected) =>
+            expected === undefined || (typeof data.session[field] === "number" && Math.abs(data.session[field] - expected) < 0.001);
+        if (!matchesRequestedHours("hoursSpent", toolArgs.hoursSpent)) {
+            return { valid: false, error: `Recorded session hoursSpent (${data.session.hoursSpent ?? "missing"}) do not match requested hoursSpent (${toolArgs.hoursSpent}).` };
+        }
+        if (toolArgs.date !== undefined && data.session.date !== toolArgs.date) {
+            return { valid: false, error: `Recorded session date (${data.session.date || "missing"}) does not match requested date (${toolArgs.date}).` };
+        }
+        for (const field of ["scheduledHours", "missedHours"]) {
+            if (!matchesRequestedHours(field, toolArgs[field])) {
+                return { valid: false, error: `Recorded session ${field} (${data.session[field] ?? "missing"}) does not match requested ${field} (${toolArgs[field]}).` };
+            }
+        }
+        if (String(toolArgs.status || "").toLowerCase() === "missed" && toolArgs.scheduledHours !== undefined && toolArgs.missedHours === undefined &&
+            !matchesRequestedHours("missedHours", toolArgs.scheduledHours)) {
+            return { valid: false, error: `Recorded missedHours (${data.session.missedHours ?? "missing"}) does not match requested scheduledHours (${toolArgs.scheduledHours}).` };
+        }
     }
 
     // Verification for get_study_plan and adapt_study_plan
@@ -357,6 +453,13 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
             return {
                 valid: false,
                 error: `${toolName} did not return a valid structured summary.`
+            };
+        }
+
+        if (toolArgs.planId && data.planId !== toolArgs.planId) {
+            return {
+                valid: false,
+                error: `${toolName} returned plan ID "${data.planId || "(missing)"}" instead of requested ID "${toolArgs.planId}".`
             };
         }
 

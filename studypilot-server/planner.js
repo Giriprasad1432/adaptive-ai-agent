@@ -4,6 +4,51 @@
  */
 
 export const DEFAULT_MISSED_SESSION_HOURS = 2;
+export const MIN_DAILY_STUDY_HOURS = 0.5;
+export const MAX_DAILY_STUDY_HOURS = 12;
+
+export function getDailyStudyHourBounds() {
+    const configuredMin = Number(process.env.STUDYPILOT_MIN_DAILY_HOURS || MIN_DAILY_STUDY_HOURS);
+    const configuredMax = Number(process.env.STUDYPILOT_MAX_DAILY_HOURS || MAX_DAILY_STUDY_HOURS);
+    const min = Number.isFinite(configuredMin) && configuredMin > 0 ? configuredMin : MIN_DAILY_STUDY_HOURS;
+    const max = Number.isFinite(configuredMax) && configuredMax >= min ? configuredMax : MAX_DAILY_STUDY_HOURS;
+    return { min, max };
+}
+
+export function getRecommendedDailyHours({ requestedHours, durationDays, examDate } = {}) {
+    const configured = Number(process.env.STUDYPILOT_DEFAULT_DAILY_HOURS || 1.5);
+    const { min, max } = getDailyStudyHourBounds();
+    const fallback = Number.isFinite(configured)
+        ? Math.min(max, Math.max(min, configured))
+        : Math.min(max, Math.max(min, 1.5));
+    if (requestedHours !== undefined && requestedHours !== null) {
+        const hours = Number(requestedHours);
+        if (!Number.isFinite(hours) || hours < min || hours > max) {
+            throw new Error(`dailyAvailableHours must be between ${min} and ${max}.`);
+        }
+        return { hours, source: "user" };
+    }
+
+    // A shorter learning window or an exam deadline merits a modestly higher,
+    // still bounded recommendation; deployments can tune the base via env.
+    const days = Number(durationDays);
+    const recommendation = examDate || (Number.isFinite(days) && days <= 14)
+        ? Math.min(max, Math.max(fallback, 2, min))
+        : fallback;
+    return { hours: recommendation, source: "recommended" };
+}
+
+function getGoalDays(durationDays) {
+    const configured = Number(process.env.STUDYPILOT_DEFAULT_DURATION_DAYS || 30);
+    const days = durationDays === undefined || durationDays === null || durationDays === ""
+        ? (Number.isFinite(configured) && configured > 0 ? configured : 30)
+        : Number(durationDays);
+    const maxDays = Number(process.env.STUDYPILOT_MAX_DURATION_DAYS || 730);
+    if (!Number.isInteger(days) || days < 1 || days > maxDays) {
+        throw new Error(`durationDays must be a whole number between 1 and ${maxDays}.`);
+    }
+    return days;
+}
 
 const PRIORITY_WEIGHTS = {
     high: 3,
@@ -61,8 +106,9 @@ export function calculateDaysRemaining(targetDateStr, referenceDate = new Date()
         throw new Error(`Invalid exam date format: "${targetDateStr}". Please use YYYY-MM-DD.`);
     }
 
-    const target = new Date(targetDateStr.trim());
-    if (Number.isNaN(target.getTime())) {
+    const [targetYear, targetMonth, targetDay] = targetDateStr.trim().split("-").map(Number);
+    const target = new Date(Date.UTC(targetYear, targetMonth - 1, targetDay));
+    if (Number.isNaN(target.getTime()) || target.getUTCFullYear() !== targetYear || target.getUTCMonth() !== targetMonth - 1 || target.getUTCDate() !== targetDay) {
         throw new Error(`Invalid exam date format: "${targetDateStr}". Please use YYYY-MM-DD.`);
     }
 
@@ -72,8 +118,7 @@ export function calculateDaysRemaining(targetDateStr, referenceDate = new Date()
     }
 
     // Parse YYYY-MM-DD components directly to avoid timezone shift
-    const [tYear, tMonth, tDay] = targetDateStr.trim().split("-").map(Number);
-    const utcTarget = Date.UTC(tYear, tMonth - 1, tDay);
+    const utcTarget = Date.UTC(targetYear, targetMonth - 1, targetDay);
     const utcToday = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
 
     const diffDays = Math.round((utcTarget - utcToday) / (1000 * 60 * 60 * 24));
@@ -91,7 +136,8 @@ export function createPlan({
     planId = "default",
     subjects,
     examDate,
-    dailyAvailableHours = 3,
+    durationDays,
+    dailyAvailableHours,
     priorities = {},
     referenceDate = new Date()
 }) {
@@ -132,13 +178,25 @@ export function createPlan({
         }
     }
 
-    const dailyHours = Number(dailyAvailableHours);
-    if (!Number.isFinite(dailyHours) || dailyHours <= 0) {
-        throw new Error("dailyAvailableHours must be a positive number.");
-    }
-
-    const daysRemaining = calculateDaysRemaining(examDate, referenceDate);
+    const hasExamDate = examDate !== undefined && examDate !== null;
+    const planDurationDays = hasExamDate
+        ? calculateDaysRemaining(examDate, referenceDate)
+        : getGoalDays(durationDays);
+    const hoursRecommendation = getRecommendedDailyHours({
+        requestedHours: dailyAvailableHours,
+        durationDays: planDurationDays,
+        examDate: hasExamDate ? examDate : null
+    });
+    const dailyHours = hoursRecommendation.hours;
+    const daysRemaining = planDurationDays;
+    const durationSource = hasExamDate ? "exam-deadline" : (durationDays === undefined || durationDays === null ? "recommended" : "user");
     const totalAvailableHours = Math.round(daysRemaining * dailyHours * 10) / 10;
+    const createdAt = new Date(referenceDate).toISOString();
+    const goalEndDate = hasExamDate ? null : new Date(Date.UTC(
+        new Date(referenceDate).getUTCFullYear(),
+        new Date(referenceDate).getUTCMonth(),
+        new Date(referenceDate).getUTCDate() + planDurationDays
+    )).toISOString().slice(0, 10);
 
     // Calculate priority weights
     let totalWeight = 0;
@@ -179,9 +237,9 @@ export function createPlan({
         let hours;
         if (index === cleanSubjects.length - 1) {
             // Allocate remainder to avoid rounding drift
-            hours = Math.max(1, Math.round((totalAvailableHours - allocatedSum) * 10) / 10);
+            hours = Math.max(0, Math.round((totalAvailableHours - allocatedSum) * 10) / 10);
         } else {
-            hours = Math.max(1, Math.round(((item.weight / totalWeight) * totalAvailableHours) * 10) / 10);
+            hours = Math.max(0, Math.round(((item.weight / totalWeight) * totalAvailableHours) * 10) / 10);
             allocatedSum += hours;
         }
 
@@ -198,8 +256,12 @@ export function createPlan({
 
     return {
         planId,
-        createdAt: new Date().toISOString(),
-        examDate,
+        createdAt,
+        examDate: hasExamDate ? examDate : null,
+        durationDays: planDurationDays,
+        durationSource,
+        goalEndDate,
+        dailyHoursSource: hoursRecommendation.source,
         daysRemaining,
         dailyAvailableHours: dailyHours,
         availableCapacityHours: totalAvailableHours,
@@ -258,15 +320,18 @@ export function normalizePlan(plan) {
  *
  * Missed Session Accounting Rule:
  * - hoursSpent: indicates actual study time spent (typically 0 when missed).
- * - missedHours: indicates scheduled session duration that was missed.
- *   If scheduledHours (or positive hoursSpent) is provided, that duration is used.
- *   Otherwise, defaults to DEFAULT_MISSED_SESSION_HOURS (2.0 hours).
+ * - missedHours: indicates the amount of the intended session that was missed.
+ * - scheduledHours: indicates the full intended session duration and can differ
+ *   from missedHours (for example, 1 missed hour in a 2-hour scheduled session).
+ *   For fully missed sessions, omitted values default from each other and then to
+ *   DEFAULT_MISSED_SESSION_HOURS (2.0 hours).
  * - Corresponding data: missedHours is recorded directly on the sessionRecord in plan.sessions,
  *   guaranteeing subject.missedHours and plan.totalMissedHours equal the sum of missed session records.
  */
 export function recordSession(plan, {
     subject,
     hoursSpent = 0,
+    missedHours = null,
     scheduledHours = null,
     status = "completed",
     notes = "",
@@ -298,20 +363,39 @@ export function recordSession(plan, {
     const hours = Number(hoursSpent) || 0;
     const normalizedStatus = status.toLowerCase();
 
+    if (!Number.isFinite(Number(hoursSpent)) || hours < 0) {
+        throw new Error("hoursSpent must be a finite, non-negative number.");
+    }
+    if (scheduledHours !== null && scheduledHours !== undefined && (!Number.isFinite(Number(scheduledHours)) || Number(scheduledHours) <= 0)) {
+        throw new Error("scheduledHours must be a finite, positive number when provided.");
+    }
+    if (missedHours !== null && missedHours !== undefined && (!Number.isFinite(Number(missedHours)) || Number(missedHours) <= 0)) {
+        throw new Error("missedHours must be a finite, positive number when provided.");
+    }
+
     let sessionMissedHours = 0;
     let sessionScheduledHours = scheduledHours !== null && scheduledHours !== undefined ? Number(scheduledHours) : 0;
 
     if (normalizedStatus === "missed") {
-        if (sessionScheduledHours > 0) {
-            sessionMissedHours = sessionScheduledHours;
-        } else if (hours > 0) {
-            sessionMissedHours = hours;
-            sessionScheduledHours = hours;
-        } else {
-            sessionMissedHours = DEFAULT_MISSED_SESSION_HOURS;
+        if (hours !== 0) {
+            throw new Error("hoursSpent must be 0 for a missed session.");
+        }
+        if (!sessionScheduledHours && missedHours !== null && missedHours !== undefined) {
+            sessionScheduledHours = Number(missedHours);
+        }
+        if (!sessionScheduledHours) {
             sessionScheduledHours = DEFAULT_MISSED_SESSION_HOURS;
         }
+        sessionMissedHours = missedHours !== null && missedHours !== undefined
+            ? Number(missedHours)
+            : sessionScheduledHours;
+        if (sessionMissedHours > sessionScheduledHours) {
+            throw new Error("missedHours cannot exceed scheduledHours.");
+        }
     } else {
+        if (missedHours !== null && missedHours !== undefined && Number(missedHours) > 0) {
+            throw new Error("missedHours can only be set for a missed session.");
+        }
         if (!sessionScheduledHours) {
             sessionScheduledHours = hours;
         }
@@ -360,6 +444,98 @@ export function recordSession(plan, {
 }
 
 /**
+ * Supersedes one incorrectly recorded session with an audited correction.
+ * The original entry and its original values remain in `sessions`; active
+ * accounting applies only the delta between the old and corrected missed hours.
+ * A stable correction ID makes retries idempotent.
+ */
+export function correctSessionRecord(plan, {
+    sessionId,
+    expectedOriginal,
+    correctedSession,
+    correctionId = `correction_${sessionId}`,
+    correctedAt = new Date().toISOString()
+}) {
+    if (!plan || !Array.isArray(plan.sessions) || !plan.subjects) {
+        throw new Error("Invalid plan provided for session correction.");
+    }
+    if (!sessionId || !expectedOriginal || !correctedSession || !correctionId) {
+        throw new Error("Session correction requires an ID, expected original values, corrected values, and correction ID.");
+    }
+
+    const original = plan.sessions.find(session => session.id === sessionId);
+    if (!original) throw new Error(`Session "${sessionId}" was not found.`);
+
+    const existingCorrectionId = original.supersededBy;
+    if (existingCorrectionId) {
+        const existingCorrection = plan.sessions.find(session => session.id === existingCorrectionId);
+        if (existingCorrection && existingCorrectionId === correctionId && existingCorrection.correctionOf === sessionId &&
+            Object.entries(correctedSession).every(([key, value]) => existingCorrection[key] === value)) {
+            return { session: existingCorrection, original, alreadyApplied: true };
+        }
+        throw new Error(`Session "${sessionId}" is already superseded by a different or inconsistent correction.`);
+    }
+
+    for (const [key, value] of Object.entries(expectedOriginal)) {
+        if (original[key] !== value) {
+            throw new Error(`Session "${sessionId}" does not match its expected original value for "${key}".`);
+        }
+    }
+    if (plan.sessions.some(session => session.id === correctionId)) {
+        throw new Error(`Correction session ID "${correctionId}" already exists without a matching supersession link.`);
+    }
+
+    const oldMissed = Number(original.missedHours || 0);
+    const nextMissed = Number(correctedSession.missedHours);
+    const scheduled = Number(correctedSession.scheduledHours);
+    const correctionDate = String(correctedSession.date || "");
+    const [year, month, day] = correctionDate.split("-").map(Number);
+    const validDate = /^\d{4}-\d{2}-\d{2}$/.test(correctionDate) &&
+        Number.isInteger(year) && Number.isInteger(month) && Number.isInteger(day) &&
+        new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) === correctionDate;
+    if (original.status !== "missed" || correctedSession.status !== "missed" || original.subject !== correctedSession.subject ||
+        !Number.isFinite(oldMissed) || oldMissed <= 0 || !Number.isFinite(nextMissed) || nextMissed <= 0 ||
+        Number(correctedSession.hoursSpent) !== 0 || !Number.isFinite(scheduled) || scheduled < nextMissed || !validDate) {
+        throw new Error("Correction must preserve the missed-session subject and provide valid date and hour values.");
+    }
+
+    const originalSnapshot = structuredClone(original);
+    const targetSubject = plan.subjects[original.subject];
+    if (!targetSubject) throw new Error(`Subject "${original.subject}" is missing from the plan.`);
+    if ((Number(targetSubject.missedHours) || 0) < oldMissed) {
+        throw new Error("Subject missed-hour total is smaller than the session being corrected.");
+    }
+
+    const corrected = {
+        ...correctedSession,
+        id: correctionId,
+        notes: correctedSession.notes ?? original.notes ?? "",
+        timestamp: correctedAt,
+        correctionOf: sessionId
+    };
+    original.supersededBy = correctionId;
+    original.correction = {
+        type: "superseded",
+        correctedAt,
+        supersededBy: correctionId,
+        originalValues: originalSnapshot
+    };
+    plan.sessions.push(corrected);
+
+    targetSubject.missedHours = Math.round(((Number(targetSubject.missedHours) || 0) - oldMissed + nextMissed) * 10) / 10;
+    if (targetSubject.unadaptedMissedHours !== undefined) {
+        targetSubject.unadaptedMissedHours = Math.max(0, Math.round(((Number(targetSubject.unadaptedMissedHours) || 0) - oldMissed + nextMissed) * 10) / 10);
+    }
+    refreshPlanTotals(plan);
+    return { session: corrected, original, alreadyApplied: false };
+}
+
+/** Number of records that are active for session-count reporting. */
+export function getActiveSessionCount(plan) {
+    return Array.isArray(plan?.sessions) ? plan.sessions.filter(session => !session.supersededBy).length : 0;
+}
+
+/**
  * Re-balances remaining schedule and adapts study plan based on actual pace and missed sessions.
  *
  * Capacity & Allocation Invariants:
@@ -391,14 +567,24 @@ export function adaptPlan(plan, {
         };
     }
 
-    if (newExamDate) {
+    if (newExamDate !== undefined && newExamDate !== null) {
+        // Validate before mutating the plan. Empty and malformed values must not be
+        // treated as an omitted optional field.
+        calculateDaysRemaining(newExamDate, referenceDate);
         plan.examDate = newExamDate;
     }
-    if (newDailyAvailableHours) {
-        plan.dailyAvailableHours = Number(newDailyAvailableHours);
+    if (newDailyAvailableHours !== undefined && newDailyAvailableHours !== null) {
+        const hours = Number(newDailyAvailableHours);
+        const { min, max } = getDailyStudyHourBounds();
+        if (!Number.isFinite(hours) || hours < min || hours > max) {
+            throw new Error(`newDailyAvailableHours must be between ${min} and ${max}.`);
+        }
+        plan.dailyAvailableHours = hours;
     }
 
-    const daysRemaining = calculateDaysRemaining(plan.examDate, referenceDate);
+    const daysRemaining = plan.examDate
+        ? calculateDaysRemaining(plan.examDate, referenceDate)
+        : (plan.goalEndDate ? calculateDaysRemaining(plan.goalEndDate, referenceDate) : getGoalDays(plan.durationDays));
     plan.daysRemaining = daysRemaining;
 
     const availableHoursCapacity = Math.round(daysRemaining * plan.dailyAvailableHours * 10) / 10;

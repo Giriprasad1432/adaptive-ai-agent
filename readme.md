@@ -162,3 +162,84 @@ Response:
   "steps": [...]
 }
 ```
+
+---
+
+## Phase 4 Readiness: Sample React Frontend
+
+There is no frontend in the repository yet. A small Vite client can live in `frontend/`; keep it as a thin client of the existing Express API.
+
+### Start commands
+
+Start Ollama and pull the configured model once:
+
+```powershell
+ollama pull llama3.2
+ollama serve
+```
+
+With the current `.env` configured for Stdio MCP, start the backend from the repository root:
+
+```powershell
+npm install
+npm start
+```
+
+The API listens on `http://localhost:3000` by default. Required backend settings are `AI_PROVIDER=ollama`, `OLLAMA_HOST=http://127.0.0.1:11434`, `OLLAMA_MODEL=llama3.2`, and `MCP_SERVER_COMMAND=node` with `MCP_SERVER_ARGS=./studypilot-server/server.js`. `PORT` optionally changes the Express API port. The MCP server defaults to Stdio; HTTP mode uses `MCP_TRANSPORT=http`, `MCP_HTTP_HOST=127.0.0.1`, and `MCP_HTTP_PORT=3001` (the MCP listener uses `PORT` first if that variable is set in its process environment). To have the backend connect over HTTP, configure `MCP_SERVER_URL=http://127.0.0.1:3001/mcp` and leave `MCP_SERVER_COMMAND` unset. The HTTP integration test currently fails during MCP initialization (see the test results in the project task report); use the known-working Stdio mode until that blocker is resolved.
+
+To start the standalone MCP HTTP listener for integration work (in one PowerShell terminal):
+
+```powershell
+$env:MCP_TRANSPORT = "http"
+$env:MCP_HTTP_HOST = "127.0.0.1"
+$env:MCP_HTTP_PORT = "3001"
+node studypilot-server/server.js
+```
+
+Create the minimal Vite project when beginning Phase 4:
+
+```powershell
+npm create vite@latest frontend -- --template react
+cd frontend
+npm install
+npm run dev
+```
+
+Set `VITE_API_BASE_URL=http://localhost:3000` in `frontend/.env.local`; Vite exposes only `VITE_` variables to browser code. Never put Ollama credentials, provider keys, MCP command details, or other secrets in frontend variables or source files.
+
+### API contract examples
+
+Health check: `GET /api/health`
+
+```json
+{
+  "status": "running",
+  "provider": "ollama",
+  "model": "llama3.2",
+  "providerStatus": { "available": true },
+  "mcp": { "configured": true, "connected": true, "toolCount": 4 }
+}
+```
+
+Tool discovery: `GET /api/tools` returns `{ "connected": true, "toolCount": 4, "tools": [...] }`, where each tool includes its name, description, and input schema.
+
+Chat: `POST /api/chat` with `Content-Type: application/json`:
+
+```json
+{ "message": "What is my progress for plan ID 2?", "messages": [] }
+```
+
+The response contains `reply`, `success`, `partialSuccess`, `rounds`, and `steps`. Invalid/missing messages return HTTP 400 with `{ "error": "A valid message is required." }`; unexpected server errors return HTTP 500 with an `error` string. Tool failures can return HTTP 200 with `success: false`, so the frontend must display the reply and failure state instead of treating every 200 response as success.
+
+The API currently enables CORS with `cors()` and permits local Vite development origins without credentials. Keep API calls on the backend; do not call Ollama or MCP directly from the browser.
+
+### Suggested components and acceptance checklist
+
+- `ChatPanel`: message history, input, submit action, loading state (disable duplicate submits while waiting), and server reply.
+- `ActivityTrace`: an optional collapsed/expandable, user-safe summary of completed tool activity; avoid displaying raw model drafts or unsupported intermediate claims.
+- `HealthIndicator`: provider/MCP availability from `/api/health`.
+- `ErrorNotice`: distinguish network/HTTP errors from an agent response with `success: false`.
+
+Read the API base from `import.meta.env.VITE_API_BASE_URL` and build endpoint URLs from that value. Poll `/api/health` on startup and at a modest interval while the UI is open; show unavailable status when the request fails rather than assuming the backend is healthy. For production, replace the current wildcard CORS policy with an explicit list of trusted frontend origins.
+
+Manual acceptance: start Ollama and the Stdio-backed API; confirm health is reachable; load discovered tools; create and retrieve a plan in a temporary/test setup; record a completed and a missed session; confirm an unknown plan displays failure; verify loading and retry behavior when the backend is stopped; confirm the UI exposes no server secrets or unsupported trace drafts.

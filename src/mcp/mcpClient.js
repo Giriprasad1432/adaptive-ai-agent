@@ -207,8 +207,12 @@ export class McpClientManager {
     /**
      * Coerce arguments against tool schema (arrays, objects, numbers)
      */
-    sanitizeArguments(rawArgs = {}, schema = null) {
-        return normalizeToolArguments({ inputSchema: schema }, rawArgs);
+    sanitizeArguments(rawArgs = {}, schema = null, options = {}) {
+        return normalizeToolArguments({ name: options.toolName, inputSchema: schema }, rawArgs, {
+            // The adaptive agent validates model-originated IDs before this boundary;
+            // direct MCP client calls already supply tool arguments intentionally.
+            trustedPlanId: options.trustedPlanId !== false
+        });
     }
 
     /**
@@ -235,7 +239,10 @@ export class McpClientManager {
             };
         }
 
-        const args = this.sanitizeArguments(rawArgs, tool.inputSchema);
+        const args = this.sanitizeArguments(rawArgs, tool.inputSchema, {
+            toolName: name,
+            trustedPlanId: options.trustedPlanId
+        });
         const timeoutMs = typeof options.timeout === "number" ? options.timeout : this.toolTimeoutMs;
 
         const abortController = new AbortController();

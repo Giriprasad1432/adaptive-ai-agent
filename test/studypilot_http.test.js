@@ -48,10 +48,15 @@ try {
         await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.equal(ready, true, `HTTP MCP server did not become ready. Output: ${serverOutput}`);
+
     // Verify McpClientManager selects Streamable HTTP and discovers tools.
     await manager.connect();
 
-    assert.equal(manager.connected, true, "McpClientManager should connect over HTTP");
+    assert.equal(
+        manager.connected,
+        true,
+        `McpClientManager should connect over HTTP. Error: ${manager.lastError || "none"}. Server output: ${serverOutput}`
+    );
 
     const managerTools = await manager.listTools();
     assert.ok(

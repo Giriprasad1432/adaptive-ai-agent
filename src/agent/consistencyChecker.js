@@ -583,6 +583,9 @@ export function formatGroundedPlanSummary(planData) {
     const dailyStudyHours = planData.dailyStudyHours || planData.dailyAvailableHours || "N/A";
     const totalAllocatedHours = planData.totalAllocatedHours || "N/A";
     const planId = planData.planId || "default";
+    const overallProgress = typeof planData.overallProgressPercentage === "number"
+        ? `${planData.overallProgressPercentage}%`
+        : (planData.overallProgress || null);
 
     const subjects = planData.subjectAllocations || planData.subjects || {};
     const subjectLines = [];
@@ -600,9 +603,13 @@ export function formatGroundedPlanSummary(planData) {
         `Study plan "${planId}" created successfully!`,
         "",
         `**Plan Summary:**`,
-        `- **Exam Date:** ${examDate} (${daysRemaining} days remaining)`,
+        planData.examDate
+            ? `- **Exam Date:** ${examDate} (${daysRemaining} days remaining)`
+            : `- **Goal Duration:** ${planData.durationDays || daysRemaining} days${planData.durationSource === "recommended" ? " (recommended)" : ""}`,
         `- **Daily Available Study Time:** ${dailyStudyHours} hours/day`,
+        planData.dailyHoursSource === "recommended" ? "- Daily hours use the planner's configurable recommendation." : "",
         `- **Total Study Hours Allocated:** ${totalAllocatedHours} hours across all subjects`,
+        overallProgress !== null ? `- **Overall Progress:** ${overallProgress}` : "",
         "",
         `**Subject Allocations:**`,
         ...subjectLines,
@@ -731,6 +738,9 @@ export function formatGroundedRetrievalSummary(planData, userMessage = "", optio
     const conciseProgressRequest = /\bprogress\b/i.test(userMessage) &&
         !/\b(?:full|entire|all|every|each)\s+subjects?\b|\bsubject[- ](?:wise|by[- ]subject)|\b(?:breakdown|details)\b/i.test(userMessage);
     if ((options.dateCorrection || proposedDate) && conciseExamDateRequest) {
+        if (!planData.examDate) {
+            return `This is a goal-based plan with no exam date. Its duration is ${planData.durationDays || daysRemaining} days.`;
+        }
         if (proposedDate && actualExamDate !== "N/A") {
             return `Not quite—your study plan lists ${formatDate(actualExamDate)}, not ${formatDate(proposedDate)}.`;
         }
@@ -745,6 +755,9 @@ export function formatGroundedRetrievalSummary(planData, userMessage = "", optio
     }
 
     if (conciseExamDateRequest) {
+        if (!planData.examDate) {
+            return `This is a goal-based plan with no exam date. Its duration is ${planData.durationDays || daysRemaining} days.`;
+        }
         return `Your exam is scheduled for ${formatDate(actualExamDate)}. You have ${daysRemaining} days remaining.`;
     }
 
@@ -783,7 +796,9 @@ export function formatGroundedRetrievalSummary(planData, userMessage = "", optio
         `Study Plan Details: "${planId}"`,
         "",
         `**Overview:**`,
-        `- **Exam Date:** ${examDate} (${daysRemaining} days remaining)`,
+        planData.examDate
+            ? `- **Exam Date:** ${examDate} (${daysRemaining} days remaining)`
+            : `- **Goal Duration:** ${planData.durationDays || daysRemaining} days`,
         `- **Daily Available Study Time:** ${dailyStudyHours} hours/day`,
         `- **Overall Progress:** ${overallProgress}`,
         `- **Total Hours:** ${totalCompleted}h completed, ${totalMissed}h missed, ${totalRemaining}h remaining`,
@@ -987,6 +1002,7 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
 
         // Check if reply contradicts or omits examDate (distinguishing omission from contradiction)
         const examDateContradiction = Boolean(data.examDate && isExamDateContradicted(finalReply, data.examDate));
+        const unsupportedExamDate = Boolean(!data.examDate && isExamDateRequested(userMessage) && extractCanonicalDates(finalReply).length > 0);
         const examDateOmission = Boolean(
             data.examDate &&
             userMessage &&
@@ -1000,18 +1016,21 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
 
         // Check if reply asserts contradictory or incorrect subject information
         const subjectContradiction = detectIncorrectSubjectInformation(finalReply, data.subjects);
-        if (subjectContradiction.contradicted || missingSubject || examDateContradiction || examDateOmission || falselyClaimsNoSessions) {
+        if (subjectContradiction.contradicted || missingSubject || examDateContradiction || examDateOmission || unsupportedExamDate || falselyClaimsNoSessions) {
             const reason = subjectContradiction.contradicted
                 ? subjectContradiction.details
                 : (missingSubject
                     ? `Final reply omitted subject "${missingSubject}" from retrieved plan.`
-                    : (examDateContradiction || examDateOmission
-                        ? `Final reply omitted or contradicted exam date "${data.examDate}".`
-                        : `Final reply falsely claimed no sessions exist when sessions are recorded.`));
+                    : (unsupportedExamDate
+                        ? "Final reply asserted an exam date, but the retrieved plan has no exam date."
+                        : (examDateContradiction || examDateOmission
+                            ? `Final reply omitted or contradicted exam date "${data.examDate}".`
+                            : `Final reply falsely claimed no sessions exist when sessions are recorded.`)));
             return {
                 valid: false,
                 reason,
-                correctedReply: formatGroundedRetrievalSummary(data, userMessage, { dateCorrection: examDateContradiction })
+                correctedReply: formatGroundedRetrievalSummary(data, userMessage, { dateCorrection: examDateContradiction }),
+                redactOriginalReply: unsupportedExamDate
             };
         }
 
@@ -1059,9 +1078,10 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
             }
         }
 
-        const conciseProgressRequest = /\bprogress\b/i.test(userMessage) &&
+        const asksAdditionalPlanFields = /\b(?:subject|daily\s+(?:availability|hours)|allocated\s+hours|completed\s+hours|remaining\s+hours|priority|priorities|session|breakdown|details)\b/i.test(userMessage);
+        const conciseProgressRequest = /\bprogress\b/i.test(userMessage) && !asksAdditionalPlanFields &&
             !/\b(?:full|entire|all|every|each)\s+subjects?\b|\bsubject[- ](?:wise|by[- ]subject)|\b(?:breakdown|details)\b/i.test(userMessage);
-        const conciseExamDateRequest = isExamDateRequested(userMessage) && requiredSubjects.length === 0;
+        const conciseExamDateRequest = isExamDateRequested(userMessage) && requiredSubjects.length === 0 && !asksAdditionalPlanFields;
         if (conciseProgressRequest || conciseExamDateRequest) {
             const conciseReply = formatGroundedRetrievalSummary(data, userMessage);
             if (finalReply.trim() !== conciseReply) {
@@ -1144,6 +1164,40 @@ export function verifyFinalAnswerConsistency(finalReply, executedTools = [], use
     // Consistency check for create_study_plan
     if (toolName === "create_study_plan" && parsedData) {
         const maxDaily = Number(parsedData.dailyStudyHours || toolArgs?.dailyAvailableHours);
+
+        const expectedProgress = typeof parsedData.overallProgressPercentage === "number"
+            ? parsedData.overallProgressPercentage
+            : null;
+        if (expectedProgress !== null) {
+            const claimedProgress = [...finalReply.matchAll(/(\d+(?:\.\d+)?)\s*%/g)]
+                .map(match => Number(match[1]))
+                .find(value => Math.abs(value - expectedProgress) > 0.01);
+            if (claimedProgress !== undefined) {
+                return {
+                    valid: false,
+                    reason: `Final reply claims ${claimedProgress}% progress, but the created plan reports ${expectedProgress}%.`,
+                    correctedReply: formatGroundedPlanSummary(parsedData)
+                };
+            }
+        }
+
+        if ((!parsedData.examDate && /\bexam\s+date\b/i.test(finalReply) && extractCanonicalDates(finalReply).length > 0) ||
+            (parsedData.examDate && isExamDateContradicted(finalReply, parsedData.examDate))) {
+            return {
+                valid: false,
+                reason: "Final reply stated an exam date that is absent from or contradicts the created plan.",
+                correctedReply: formatGroundedPlanSummary(parsedData)
+            };
+        }
+
+        const usedRecommendation = parsedData.dailyHoursSource === "recommended" || parsedData.durationSource === "recommended";
+        if (usedRecommendation && !/\b(?:recommend(?:ed|ation)?|default)\b/i.test(finalReply)) {
+            return {
+                valid: false,
+                reason: "Final reply did not explain that the planner selected a recommended duration or daily study schedule.",
+                correctedReply: formatGroundedPlanSummary(parsedData)
+            };
+        }
 
         if (Number.isFinite(maxDaily) && maxDaily > 0) {
             const overrun = detectDailyScheduleOverrun(finalReply, maxDaily);

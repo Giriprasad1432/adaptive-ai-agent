@@ -50,8 +50,9 @@ async function runNormalizationSuite() {
                 },
                 examDate: {
                     type: "string",
-                    description: "Target exam date in YYYY-MM-DD format"
+                    description: "Optional target exam date in YYYY-MM-DD format"
                 },
+                durationDays: { type: "integer", description: "Goal-plan duration in days" },
                 dailyAvailableHours: {
                     type: "number",
                     description: "Daily study hours"
@@ -66,7 +67,7 @@ async function runNormalizationSuite() {
                     description: "Plan identifier"
                 }
             },
-            required: ["subjects", "examDate", "dailyAvailableHours"]
+            required: ["subjects"]
         }
     };
 
@@ -179,14 +180,14 @@ async function runNormalizationSuite() {
     assert.equal(validCheck.valid, true, "Valid normalized arguments must pass validation");
     console.log("✓ Normalized arguments passed validation");
 
-    // 2.2 Missing required field should fail with actionable message
+    // 2.2 Exam date and daily hours are optional for goal-based plans.
     const missingCheck = validateToolArguments(studyPlanSchema, {
-        subjects: ["Mathematics"],
-        dailyAvailableHours: 3
+        subjects: ["JavaScript"],
+        durationDays: 7
     });
-    assert.equal(missingCheck.valid, false);
-    assert.ok(missingCheck.error.includes('Missing required parameter "examDate"'));
-    console.log("✓ Missing required parameter flagged:", missingCheck.error);
+    assert.equal(missingCheck.valid, true);
+    assert.equal(validateToolArguments(studyPlanSchema, { dailyAvailableHours: 3 }).valid, false, "Subjects remain required");
+    console.log("✓ Goal-based plans validate without an exam date or explicit hours");
 
     // 2.3 Malformed artifacts in subject names should fail
     const corruptedSubjectCheck = validateToolArguments(studyPlanSchema, {
@@ -208,6 +209,7 @@ async function runNormalizationSuite() {
         isError: false,
         content: JSON.stringify({
             message: "Study plan created",
+            planId: normalized.planId,
             subjectAllocations: {
                 '["Mathematics"': { priority: "medium", allocatedHours: 10 },
                 '"Physics"': { priority: "medium", allocatedHours: 10 },
@@ -225,6 +227,7 @@ async function runNormalizationSuite() {
         isError: false,
         content: JSON.stringify({
             message: "Study plan created",
+            planId: normalized.planId,
             subjectAllocations: {
                 Mathematics: { priority: "medium", allocatedHours: 10 },
                 Physics: { priority: "medium", allocatedHours: 10 },
@@ -242,6 +245,7 @@ async function runNormalizationSuite() {
         isError: false,
         content: JSON.stringify({
             message: "Study plan created",
+            planId: normalized.planId,
             subjectAllocations: {
                 Mathematics: { priority: "high", allocatedHours: 30 },
                 Physics: { priority: "medium", allocatedHours: 20 },
@@ -526,7 +530,10 @@ Adjust as needed for your learning style.`
     assert.equal(extractExplicitPlanId('Please adapt study plan for plan physics-intensive'), "physics-intensive");
     assert.equal(extractExplicitPlanId('Please record session', [
         { role: "assistant", content: 'Study plan "history-101" created successfully!' }
-    ]), "history-101");
+    ]), null, "Unverified assistant prose must not select an existing plan");
+    assert.equal(extractExplicitPlanId('Please record session', [
+        { role: "tool", content: JSON.stringify({ planId: "history-101" }) }
+    ]), "history-101", "Verified tool result IDs remain available as context");
     // Does not match tool names
     assert.equal(extractExplicitPlanId('Please invoke adapt_study_plan'), null);
     assert.equal(extractExplicitPlanId('Just record my study session'), null);
@@ -540,8 +547,10 @@ Adjust as needed for your learning style.`
             properties: {
                 subject: { type: "string" },
                 hoursSpent: { type: "number" },
+                missedHours: { type: "number" },
+                scheduledHours: { type: "number" },
                 status: { type: "string" },
-                planId: { type: "string" }
+                planId: { type: "string", description: "Unique plan ID. Defaults to 'default'." }
             },
             required: ["subject", "hoursSpent", "status"]
         }
@@ -722,6 +731,9 @@ Adjust as needed for your learning style.`
     const unknownResult = await unknownAgent.run({
         message: `Get study plan for planId "${unknownPlanId}"`
     });
+
+    const unknownCall = unknownResult.steps.find(step => step.type === "tool_executing");
+    assert.equal(unknownCall?.arguments?.planId, unknownPlanId, "Explicit unknown plan ID must be passed through for honest lookup failure");
 
     assert.equal(unknownResult.success, false, "Unknown plan ID must result in success=false");
     assert.ok(unknownResult.reply.includes("Action Failed") || unknownResult.reply.includes(unknownPlanId), "Reply must indicate honest failure");
@@ -1751,7 +1763,7 @@ Adjust as needed for your learning style.`
                 hoursSpent: { type: "number" },
                 status: { type: "string" },
                 date: { type: "string" },
-                planId: { type: "string" }
+                planId: { type: "string", description: "Unique plan ID. Defaults to 'default'." }
             }
         }
     };
@@ -1804,6 +1816,7 @@ Adjust as needed for your learning style.`
 
     // 15.6 Grounded Final Responses: Raw JSON study plan dump intercepted
     const mockSessionResult = {
+        planId: "default",
         message: 'Study session for "Mathematics" recorded successfully (completed).',
         session: { subject: "Mathematics", hoursSpent: 2, status: "completed", date: "2026-10-12" },
         subjectProgress: { subject: "Mathematics", completedHours: 2, missedHours: 0, remainingHours: 10, progressPercentage: "16.7%" },
@@ -1857,6 +1870,7 @@ Adjust as needed for your learning style.`
                 isError: false,
                 content: JSON.stringify({
                     message: `Study session for "${args.subject}" recorded successfully (${args.status}).`,
+                    planId: args.planId || "default",
                     session: { subject: args.subject, hoursSpent: args.hoursSpent, status: args.status, date: "2026-10-12" },
                     subjectProgress: { subject: args.subject, completedHours: args.hoursSpent, missedHours: 0, remainingHours: 10, progressPercentage: "16.7%" },
                     overallPlanProgress: "16.7%"

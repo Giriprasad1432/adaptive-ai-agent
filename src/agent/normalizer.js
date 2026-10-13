@@ -277,12 +277,18 @@ export function isToolNameLike(str, knownTools = []) {
  * @returns {string|null} Extracted planId, or null if none found
  */
 export function extractExplicitPlanId(text, conversation = []) {
-    const isDateLikeOrPlaceholder = (value) => /(?:\b\d{4}-\d{2}-\d{2}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(value);
+    const isDateLikeOrPlaceholder = (value, sourceText = "", start = -1) => {
+        const token = String(value || "");
+        const monthDate = new RegExp(`\\b${token}\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}\\b`, "i");
+        return /(?:\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(token) ||
+            (start >= 0 && monthDate.test(sourceText.slice(start, start + token.length + 24)));
+    };
     const STOP_WORDS = new Set([
         "for", "to", "is", "and", "the", "with", "from", "on", "a", "an", "that", "this",
         "my", "our", "new", "each", "details", "data", "changes", "now", "because",
         "so", "as", "if", "when", "while", "please", "report", "show", "get", "retrieve",
-        "progress"
+        "progress", "date", "exam", "examdate", "exam_date", "exam-date",
+        "id", "identifier", "number", "name", "planid", "plan_id"
     ]);
 
     const searchInText = (t) => {
@@ -292,15 +298,23 @@ export function extractExplicitPlanId(text, conversation = []) {
         // e.g. planId "adaptive-demo", planId: adaptive-demo, plan_id='custom-plan'
         const planIdRegex = /\bplan(?:_?id)\s*[:=]?\s*["']?([a-zA-Z0-9_\-]+)["']?/i;
         const match1 = t.match(planIdRegex);
-        if (match1 && match1[1] && !isDateLikeOrPlaceholder(match1[1]) && !isToolNameLike(match1[1]) && !STOP_WORDS.has(match1[1].toLowerCase())) {
+        if (match1 && match1[1] && !isDateLikeOrPlaceholder(match1[1], t, match1.index + match1[0].lastIndexOf(match1[1])) && !isToolNameLike(match1[1]) && !STOP_WORDS.has(match1[1].toLowerCase())) {
             return match1[1];
+        }
+
+        // "plan ID 2" is a labeled identifier, not a plan whose ID is "ID".
+        // Match the value after the label before the broader "plan <name>" matcher.
+        const labeledPlanIdRegex = /\bplan\s+(?:with\s+)?(?:id|identifier|number)\s*[:=#]?\s*["']?([a-zA-Z0-9_\-]+)["']?/i;
+        const labeledMatch = t.match(labeledPlanIdRegex);
+        if (labeledMatch && labeledMatch[1] && !isDateLikeOrPlaceholder(labeledMatch[1], t, labeledMatch.index + labeledMatch[0].lastIndexOf(labeledMatch[1])) && !isToolNameLike(labeledMatch[1]) && !STOP_WORDS.has(labeledMatch[1].toLowerCase())) {
+            return labeledMatch[1];
         }
 
         // 2. "study plan <name>" or "plan <name>" with quotes:
         // e.g. study plan "adaptive-demo", for plan adaptive-demo, in plan "my-plan"
         const planNameRegex = /(?:study\s+plan|study-plan|plan)\s+["']([a-zA-Z0-9_\-]+)["']/i;
         const match2 = t.match(planNameRegex);
-        if (match2 && match2[1] && !isDateLikeOrPlaceholder(match2[1]) && !isToolNameLike(match2[1]) && !STOP_WORDS.has(match2[1].toLowerCase())) {
+        if (match2 && match2[1] && !isDateLikeOrPlaceholder(match2[1], t, match2.index + match2[0].lastIndexOf(match2[1])) && !isToolNameLike(match2[1]) && !STOP_WORDS.has(match2[1].toLowerCase())) {
             return match2[1];
         }
 
@@ -310,7 +324,17 @@ export function extractExplicitPlanId(text, conversation = []) {
         const planWordMatches = [...t.matchAll(/(?:(?:retrieve|get|show|view|inspect|report\s+on|adapt|rebalance|modify|update|for|in|from|to|with|of)\s+)?\b(?:study\s+plan|study-plan|plan)\b\s+(?:(?:for|with|named|called)\s+(?:plan\s+)?)?([a-zA-Z0-9_\-]+)/gi)];
         for (const m of planWordMatches) {
             const candidate = m[1];
-            if (candidate && !isDateLikeOrPlaceholder(candidate) && !isToolNameLike(candidate) && !STOP_WORDS.has(candidate.toLowerCase())) {
+            const candidateOffset = m[0].lastIndexOf(candidate);
+            const prefix = m[0].slice(0, candidateOffset);
+            // "study plan for Mathematics" describes the plan's subject, not its ID.
+            // Require an explicit "for plan" / named marker when a preposition
+            // separates the plan name from its identifier.
+            const ambiguousPreposition = /\b(?:study\s+plan|study-plan|plan)\s+(?:for|with)\s*$/i.test(prefix) &&
+                !/\b(?:for|with)\s+plan\s*$/i.test(prefix) &&
+                !/\b(?:named|called)\s*$/i.test(prefix) &&
+                !/[-_\d]/.test(candidate);
+            if (ambiguousPreposition) continue;
+            if (candidate && !isDateLikeOrPlaceholder(candidate, t, m.index + candidateOffset) && !isToolNameLike(candidate) && !STOP_WORDS.has(candidate.toLowerCase())) {
                 return candidate;
             }
         }
@@ -318,7 +342,7 @@ export function extractExplicitPlanId(text, conversation = []) {
         // 5. Assistant confirmation message: Study plan "<planId>" created successfully!
         const confirmRegex = /Study\s+plan\s+["']([a-zA-Z0-9_\-]+)["']\s+created\s+successfully/i;
         const match5 = t.match(confirmRegex);
-        if (match5 && match5[1] && !isToolNameLike(match5[1]) && !STOP_WORDS.has(match5[1].toLowerCase())) {
+        if (match5 && match5[1] && !isDateLikeOrPlaceholder(match5[1], t, match5.index + match5[0].lastIndexOf(match5[1])) && !isToolNameLike(match5[1]) && !STOP_WORDS.has(match5[1].toLowerCase())) {
             return match5[1];
         }
 
@@ -331,16 +355,23 @@ export function extractExplicitPlanId(text, conversation = []) {
 
     // Check conversation history in reverse order (most recent first)
     if (Array.isArray(conversation) && conversation.length > 0) {
+        let currentUserTurnPassed = false;
         for (let i = conversation.length - 1; i >= 0; i--) {
             const msg = conversation[i];
             if (!msg || msg.role === "system") continue;
 
-            // Check message content
-            const fromContent = searchInText(msg.content);
-            if (fromContent) return fromContent;
+            if (msg.role === "user") {
+                if (!currentUserTurnPassed && (!text || msg.content === text)) {
+                    currentUserTurnPassed = true;
+                    continue;
+                }
+                // A prior user turn separates older tool results from the current
+                // intent; do not reuse an ID across that boundary.
+                break;
+            }
 
-            // Only trust IDs in verified tool results. Assistant tool-call arguments are
-            // model proposals and can contain hallucinated identifiers.
+            // Only use IDs returned by a successful tool result. Assistant text and
+            // tool-call arguments can contain model-proposed or stale identifiers.
             if (msg.role === "tool" && typeof msg.content === "string") {
                 const result = tryParseJson(msg.content);
                 if (result && typeof result.planId === "string" && result.planId.trim() && !isDateLikeOrPlaceholder(result.planId) && !isToolNameLike(result.planId)) {
@@ -394,9 +425,11 @@ export function isRetrievalIntent(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     const clean = text.trim();
 
-    // Exclude explicit requests to adapt or modify schedule
-    const isExplicitAdapt = /\b(?:adapt|re-?balance|modify\s+schedule|adjust\s+schedule|recalculate)\b/i.test(clean);
-    if (isExplicitAdapt) return false;
+    const isPlanCreation = /\b(?:create|make|build|generate)\b.{0,60}\b(?:study\s+plan|plan)\b/i.test(clean);
+    if (isPlanCreation && !hasExplicitPlanRetrievalRequest(clean)) return false;
+
+    // Adaptation phrases must not be redirected to retrieval.
+    if (isAdaptationIntent(clean)) return false;
 
     // For session recording requests, treat as retrieval intent only if the user
     // ALSO explicitly requested a separate study plan retrieval
@@ -423,7 +456,7 @@ export function isRetrievalIntent(text) {
  */
 export function isAdaptationIntent(text) {
     if (typeof text !== "string" || !text.trim()) return false;
-    return /\b(?:adapt|re-?balance|re-?calculate|adjust\s+(?:remaining\s+)?schedule|update\s+schedule)\b/i.test(text);
+    return /\b(?:adapt|re-?balance|re-?calculate)\b|\b(?:adjust|update|modify|change)\b.{0,30}\b(?:schedule|study\s+plan|plan)\b/i.test(text);
 }
 
 /**
@@ -586,12 +619,40 @@ export function userExplicitlyKeptExamDateUnchanged(text) {
  */
 export function isDateAssociatedWithSession(dateStr, text) {
     if (typeof dateStr !== "string" || !dateStr.trim() || typeof text !== "string") return false;
-    const cleanDate = dateStr.trim();
+    const isoDate = extractExplicitDate(dateStr.trim());
+    if (!isoDate) return false;
+    const [year, month, day] = isoDate.split("-").map(Number);
+    const monthName = new Intl.DateTimeFormat("en-US", { month: "long", timeZone: "UTC" })
+        .format(new Date(Date.UTC(year, month - 1, day)));
+    const datePattern = `(?:${isoDate}|${monthName}\\s+${day}(?:st|nd|rd|th)?[,]?\\s+${year}|${day}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${monthName}[,]?\\s+${year})`;
     const pattern = new RegExp(
-        `(?:session|missed|studied|study|class|completed)[^.\\n]{0,60}\\b${cleanDate}\\b|\\b${cleanDate}\\b[^.\\n]{0,60}(?:session|missed|studied|study|class|completed)`,
+        `(?:session|missed|studied|study|class|completed)[^.\\n]{0,80}\\b${datePattern}\\b|\\b${datePattern}\\b[^.\\n]{0,80}(?:session|missed|studied|study|class|completed)`,
         "i"
     );
     return pattern.test(text);
+}
+
+/** Return the explicit calendar date associated with a session in the request. */
+export function extractExplicitSessionDate(text) {
+    if (typeof text !== "string" || !text.trim()) return null;
+    const dateToken = /\b\d{4}-\d{2}-\d{2}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?[,]?\s+\d{4}\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)[,]?\s+\d{4}\b/gi;
+    for (const match of text.matchAll(dateToken)) {
+        const normalizedDate = extractExplicitDate(match[0]);
+        if (normalizedDate && isDateAssociatedWithSession(normalizedDate, text)) return normalizedDate;
+    }
+    return null;
+}
+
+/** Extract a missed amount and intended session duration when the user states them. */
+export function extractExplicitMissedSessionHours(text) {
+    if (typeof text !== "string" || !text.trim()) return { missedHours: null, scheduledHours: null };
+    const missedMatch = text.match(/\bmissed\s+(?:a\s+)?(\d+(?:\.\d+)?)\s*(?:-\s*)?(?:hours?|hrs?)\b|\b(\d+(?:\.\d+)?)\s*(?:-\s*)?(?:hours?|hrs?)[^.\n]{0,50}\bmissed\b/i);
+    const scheduledMatch = text.match(/\b(\d+(?:\.\d+)?)\s*-\s*(?:hours?|hrs?)[^.\n]{0,50}\b(?:study\s+)?session\b|\b(?:scheduled|session)\b[^.\n]{0,50}\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/i);
+    // Both missed-duration alternatives are explicit amounts; use the first match.
+    const missedHours = missedMatch ? Number(missedMatch.slice(1).find(Boolean)) : null;
+    let scheduledHours = scheduledMatch ? Number(scheduledMatch.slice(1).find(Boolean)) : null;
+    if (scheduledHours === null && missedHours !== null) scheduledHours = missedHours;
+    return { missedHours, scheduledHours };
 }
 
 /**
@@ -612,7 +673,10 @@ export function hasExplicitNewExamDateRequest(text, targetDate) {
         new RegExp(`\\bexam\\s+(?:is\\s+)?(?:postponed|rescheduled|moved)\\s+to\\s+${datePattern}`, "i"),
         new RegExp(`\\bexam\\s+on\\s+${datePattern}`, "i")
     ];
-    return patterns.some(p => p.test(text));
+    if (patterns.some(p => p.test(text))) return true;
+    const explicitDate = extractExplicitDate(text);
+    const explicitlyChanging = /\b(?:change|move|reschedule|postpone|shift|set|update)\b.{0,40}\b(?:exam\s+date|exam)\b|\bnew\s+exam\s+date\b/i.test(text);
+    return Boolean(explicitlyChanging && explicitDate && targetDate && explicitDate === targetDate);
 }
 
 /**
@@ -623,14 +687,7 @@ export function hasExplicitNewExamDateRequest(text, targetDate) {
  * @returns {boolean}
  */
 export function shouldOmitAdaptationExamDate(rawExamDate, userText, conversation = []) {
-    if (!userText && (!Array.isArray(conversation) || conversation.length === 0)) {
-        return false;
-    }
-
-    const textToScan = [
-        userText,
-        ...(Array.isArray(conversation) ? conversation.filter(m => m && m.role !== "system").map(m => m.content || "") : [])
-    ].filter(Boolean).join(" ");
+    const textToScan = typeof userText === "string" ? userText : "";
 
     if (!textToScan.trim()) {
         return false;
@@ -665,14 +722,7 @@ export function shouldOmitAdaptationExamDate(rawExamDate, userText, conversation
  * @returns {boolean}
  */
 export function shouldOmitDailyHours(rawHours, userText, conversation = []) {
-    if (!userText && (!Array.isArray(conversation) || conversation.length === 0)) {
-        return false;
-    }
-
-    const textToScan = [
-        userText,
-        ...(Array.isArray(conversation) ? conversation.filter(m => m && m.role !== "system").map(m => m.content || "") : [])
-    ].filter(Boolean).join(" ");
+    const textToScan = typeof userText === "string" ? userText : "";
 
     if (!textToScan.trim()) {
         return false;
@@ -706,24 +756,52 @@ export function shouldOmitSessionDate(rawDate, userText = "", conversation = [])
             return true;
         }
 
-        const textToScan = [
-            userText,
-            ...(Array.isArray(conversation) ? conversation.filter(m => m && m.role === "user").map(m => m.content || "") : [])
-        ].filter(Boolean).join(" ");
+        const textToScan = typeof userText === "string" ? userText : "";
+        // A second normalization pass with no user turn is a transport boundary;
+        // preserve the already-normalized date instead of treating it as a guess.
+        if (!textToScan.trim()) return false;
+        const explicitSessionDate = extractExplicitSessionDate(textToScan);
 
         // 2. If the user explicitly wrote this date in their prompt, preserve it!
-        if (textToScan.includes(rawDate.trim())) {
+        if (explicitSessionDate && extractExplicitDate(rawDate.trim()) === explicitSessionDate) {
             return false;
         }
 
         // 3. If user prompt specifically asks for "today" (or does not contain any YYYY-MM-DD date),
         // and model generated an unmentioned date (like "2024-01-01"), omit it so the server defaults to today.
-        const hasExplicitDateInText = /\b\d{4}-\d{2}-\d{2}\b/.test(textToScan);
+        const hasExplicitDateInText = Boolean(explicitSessionDate && extractExplicitDate(rawDate.trim()) === explicitSessionDate);
         if (!hasExplicitDateInText || /\btoday\b/i.test(textToScan)) {
             return true;
         }
     }
     return false;
+}
+
+function extractExplicitDate(text) {
+    const iso = String(text || "").match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+    let year;
+    let month;
+    let day;
+    if (iso) {
+        [, year, month, day] = iso;
+    } else {
+        const natural = String(text || "").match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:st|nd|rd|th)?[,]?\s+(\d{4})\b/i);
+        if (!natural) return null;
+        const monthIndex = new Date(`${natural[1]} 1, 2000`).getMonth() + 1;
+        year = natural[3];
+        month = String(monthIndex).padStart(2, "0");
+        day = natural[2].padStart(2, "0");
+    }
+    const y = Number(year);
+    const m = Number(month);
+    const d = Number(day);
+    const candidate = new Date(Date.UTC(y, m - 1, d));
+    // Preserve a user's explicit but invalid calendar date so validation can explain
+    // the error; never silently replace it with a model-generated date.
+    if (!iso && (candidate.getUTCFullYear() !== y || candidate.getUTCMonth() !== m - 1 || candidate.getUTCDate() !== d)) {
+        return `${year}-${month}-${day}`;
+    }
+    return `${year}-${month}-${day}`;
 }
 
 /**
@@ -852,6 +930,29 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
         normalized[key] = value;
     }
 
+    const currentUserText = options.message || options.userMessage || "";
+    if ((toolOrSchema?.name || schema?.name) === "create_study_plan") {
+        const explicitHours = currentUserText.match(/(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:per|a|each)\s*day\b|(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*daily\b|(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\s*(?:\/|per\s+)day\b/i);
+        const explicitDuration = currentUserText.match(/\b(\d{1,4})\s*[- ]?days?\b|\b(\d{1,3})\s*weeks?\b/i);
+        const hourValue = explicitHours && Number(explicitHours[1] || explicitHours[2] || explicitHours[3]);
+        const durationValue = explicitDuration && (explicitDuration[1]
+            ? Number(explicitDuration[1])
+            : Number(explicitDuration[2]) * 7);
+        if (Number.isFinite(hourValue) && properties.dailyAvailableHours) normalized.dailyAvailableHours = hourValue;
+        else if (currentUserText.trim() && properties.dailyAvailableHours) delete normalized.dailyAvailableHours;
+        if (durationValue && properties.durationDays) normalized.durationDays = durationValue;
+        else if (currentUserText.trim() && properties.durationDays) delete normalized.durationDays;
+        const explicitDate = extractExplicitDate(currentUserText);
+        if (explicitDate && properties.examDate) normalized.examDate = explicitDate;
+        else if (currentUserText.trim() && properties.examDate &&
+            !/\b\d{4}-\d{2}-\d{2}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}/i.test(currentUserText) &&
+            !(/\b(?:exam\s+date|exam\s+(?:is\s+)?on)\b/i.test(currentUserText) && !/\b(?:no|without|not|don't|do\s+not)\b.{0,20}\b(?:exam\s+date|date)\b/i.test(currentUserText))) {
+            // A date not supplied by the user is an optional model guess. Omit it so
+            // goal-based planning proceeds without a fabricated or stale exam date.
+            delete normalized.examDate;
+        }
+    }
+
     // 7. Context-Aware Plan Identifier Resolution
     // If the tool schema accepts planId, ensure explicit user-specified plan identifiers
     // are faithfully preserved and never displaced by hallucinated tool-name strings.
@@ -863,22 +964,28 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
         const currentVal = normalized.planId;
         const isToolName = currentVal && isToolNameLike(currentVal, options.knownTools);
 
-        if (userPlanId) {
-            // User explicitly requested a specific plan ID in prompt/conversation.
-            // If model generated a tool name, omitted planId, or generated "default",
-            // restore the user's explicit plan ID!
-            if (isToolName || !currentVal || currentVal === "default") {
-                normalized.planId = userPlanId;
-            }
-        } else if ((toolOrSchema?.name || schema?.name) === "get_study_plan") {
-            // Never pass a model-invented ID into retrieval. Honor a documented tool
-            // default only when the tool schema itself explicitly declares it.
-            const planIdDescription = String(properties.planId?.description || "");
-            if (/defaults?\s+to\s+['"]?default\b/i.test(planIdDescription)) {
-                normalized.planId = "default";
-            } else {
-                delete normalized.planId;
-            }
+        const contextPlanId = userPlanId;
+        const planIdDescription = String(properties.planId?.description || "");
+        const hasDocumentedDefault = /defaults?\s+to\s+['"]?default\b/i.test(planIdDescription);
+        if (contextPlanId) {
+            // The latest user's explicit identifier always wins over model arguments.
+            normalized.planId = contextPlanId;
+        } else if (options.trustedPlanId && currentVal && !isToolName &&
+            !/(?:\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(String(currentVal))) {
+            // AdaptiveAgent marks arguments trusted only after context resolution and
+            // validation. Preserve that identifier through the MCP client's second
+            // schema normalization pass.
+            normalized.planId = currentVal;
+        } else if (isToolName || (currentVal && currentVal !== "default")) {
+            // Do not let an unverified model proposal silently select a different plan.
+            // A documented default is safe only when the model actually selected it.
+            if (currentVal === "default" && hasDocumentedDefault) normalized.planId = "default";
+            else if (hasDocumentedDefault && /(?:\b\d{4}-\d{2}-\d{2}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(String(currentVal || ""))) normalized.planId = "default";
+            else delete normalized.planId;
+        } else if (!currentVal && hasDocumentedDefault && !rawArgs.planId) {
+            // Preserve an explicitly documented server default only when the model did
+            // not propose a different (now rejected) identifier.
+            normalized.planId = "default";
         }
         // For retrieval, model-supplied IDs are discarded above unless independently
         // verified in tool-result context or explicitly provided by the user.
@@ -919,16 +1026,22 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
         const userText = options.message || options.userMessage;
         const conversation = options.messages || options.conversation || options.context;
 
-        const textToScan = [
-            userText,
-            ...(Array.isArray(conversation) ? conversation.filter(m => m && m.role === "user").map(m => m.content || "") : [])
-        ].filter(Boolean).join(" ");
-
-        const explicitDateMatch = textToScan.match(/\b\d{4}-\d{2}-\d{2}\b/);
-        if (explicitDateMatch && !/\btoday\b/i.test(textToScan)) {
-            normalized.date = explicitDateMatch[0];
+        const textToScan = typeof userText === "string" ? userText : "";
+        const explicitSessionDate = extractExplicitSessionDate(textToScan);
+        if (explicitSessionDate) {
+            normalized.date = explicitSessionDate;
         } else if (normalized.date !== undefined && shouldOmitSessionDate(normalized.date, userText, conversation)) {
             delete normalized.date;
+        }
+
+        if (String(normalized.status || "").toLowerCase() === "missed") {
+            // Missed sessions record no actual study time. Keep the missed amount
+            // and the intended session duration as distinct values.
+            normalized.hoursSpent = 0;
+            const explicitHours = extractExplicitMissedSessionHours(textToScan);
+            if (explicitHours.missedHours !== null) normalized.missedHours = explicitHours.missedHours;
+            if (explicitHours.scheduledHours !== null) normalized.scheduledHours = explicitHours.scheduledHours;
+            else if (explicitHours.missedHours !== null) normalized.scheduledHours = explicitHours.missedHours;
         }
     }
 
