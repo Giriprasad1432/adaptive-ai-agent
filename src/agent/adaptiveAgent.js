@@ -5,6 +5,21 @@ import { verifyFinalAnswerConsistency, stripMetaPreamble, formatGroundedPlanSumm
 
 const MUTATION_TOOLS = new Set(["record_study_session", "create_study_plan", "adapt_study_plan"]);
 
+function isMalformedToolCallJsonError(error) {
+    return error?.code === "MALFORMED_TOOL_CALL_JSON" ||
+        (error?.status === 400 &&
+            error?.error?.code === "tool_use_failed" &&
+            /failed to parse tool call arguments as json/i.test(error?.error?.message || ""));
+}
+
+function matchingPlansByMentionedSubject(plans, message) {
+    if (!Array.isArray(plans) || typeof message !== "string") return [];
+    return plans.filter(plan => (plan.subjects || []).some(subject => {
+        const escaped = String(subject).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return escaped && new RegExp(`\\b${escaped}\\b`, "i").test(message);
+    }));
+}
+
 function areToolArgumentsEqual(args1, args2) {
     if (args1 === args2) return true;
     if (!args1 || !args2) return false;
@@ -100,6 +115,7 @@ export class AdaptiveAgent {
         let turnSuccesses = [];
         let lastToolExecutionFailed = false;
         let lastToolFailureReason = "";
+        let malformedToolCallCorrectionAttempted = false;
 
         // Plan enumeration is deterministic. Avoid sending a potentially large
         // catalog back through the model on a later round (and avoid accidental
@@ -171,7 +187,24 @@ export class AdaptiveAgent {
                 concluded = true;
             } else {
                 if (listedData.plans.length === 1) resolvedActivePlanId = listedData.plans[0].planId;
-                conversation.push({ role: "system", content: `Verified saved study plans (internal IDs; never ask the user to repeat an ID): ${JSON.stringify(listedData.plans)}. Select a single matching plan by its subjects or ask the user to choose by subject/description when ambiguous.` });
+                else if (listedData.plans.length > 1) {
+                    const subjectMatches = matchingPlansByMentionedSubject(listedData.plans, message);
+                    if (subjectMatches.length === 1) {
+                        resolvedActivePlanId = subjectMatches[0].planId;
+                    } else if (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message)) {
+                        finalReply = "I found more than one saved study plan and can't safely tell which one you mean. Which plan should I use? You can identify it by its subject or goal.";
+                        completed = false;
+                        concluded = true;
+                        steps.push({
+                            type: "plan_selection_required",
+                            candidateCount: listedData.plans.length,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                }
+                if (!concluded) {
+                    conversation.push({ role: "system", content: `Verified saved study plans (internal IDs; never ask the user to repeat an ID): ${JSON.stringify(listedData.plans)}. Use the verified active plan ID selected from the current request; if ambiguous, ask the user to choose by subject or goal.` });
+                }
             }
         }
 
@@ -192,6 +225,29 @@ export class AdaptiveAgent {
                     tools
                 });
             } catch (error) {
+                // Groq can reject a generated tool call before returning a
+                // provider response when its argument string is malformed JSON.
+                // No MCP call has occurred at this point, so one bounded model
+                // correction is safe. Other provider failures are never retried.
+                const hasAnyToolExecution = executedTools.length > 0;
+                if (!malformedToolCallCorrectionAttempted && !hasAnyToolExecution && isMalformedToolCallJsonError(error)) {
+                    malformedToolCallCorrectionAttempted = true;
+                    steps.push({
+                        round,
+                        type: "provider_tool_call_correction",
+                        reason: "Provider rejected malformed tool-call JSON before any tool executed.",
+                        timestamp: new Date().toISOString()
+                    });
+                    conversation.push({
+                        role: "assistant",
+                        content: "The provider rejected the previous tool call because its arguments were not valid JSON. No tool was executed."
+                    });
+                    conversation.push({
+                        role: "user",
+                        content: "Make one correction attempt for my original request. If a tool is needed, return valid JSON arguments matching the provided tool schema. Do not claim the action succeeded unless the tool result confirms it."
+                    });
+                    continue;
+                }
                 const errorMsg = `Provider error during round ${round}: ${error.message}`;
                 steps.push({
                     round,

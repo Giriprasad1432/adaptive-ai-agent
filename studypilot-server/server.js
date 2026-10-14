@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getPlan, loadAllPlans, saveNewPlan, updatePlan } from "./storage.js";
-import { createPlan, recordSession, adaptPlan, getActiveSessionCount } from "./planner.js";
+import { createPlan, recordSession, adaptPlan, getActiveSessionCount, resolvePlanDayDate } from "./planner.js";
 
 function createMcpServer() {
     // Initialize the StudyPilot MCP Server
@@ -229,15 +229,19 @@ function createMcpServer() {
             scheduledHours: z.number().optional().describe("Intended duration of the session in hours. For missed sessions, defaults to missedHours or 2h."),
             notes: z.string().optional().describe("Optional notes or reason for missed session"),
             date: z.string().optional().describe("Date of session in YYYY-MM-DD format (defaults to today)"),
+            dayNumber: z.number().int().optional().describe("Plan day number when the user says Day N. Day 1 is the plan start date; an explicit calendar date takes precedence."),
             planId: z.string().optional().describe("Internal identifier from the active conversation, a verified plan list, or explicit user reference. Never default to another plan.")
         },
-        async ({ subject, hoursSpent, status, missedHours, scheduledHours, notes, date, planId }) => {
+        async ({ subject, hoursSpent, status, missedHours, scheduledHours, notes, date, dayNumber, planId }) => {
             try {
                 if (!planId) return { isError: true, content: [{ type: "text", text: "No study plan was selected. List saved plans and choose by subject or plan description." }] };
                 const updated = updatePlan(planId, (plan) => {
                     if (!Object.hasOwn(plan.subjects || {}, subject)) {
                         throw new Error(`Subject "${subject}" is not part of study plan "${planId}".`);
                     }
+                    const sessionDate = date || (dayNumber !== undefined
+                        ? resolvePlanDayDate(plan, dayNumber)
+                        : undefined);
                     return recordSession(plan, {
                         subject,
                         hoursSpent,
@@ -245,7 +249,7 @@ function createMcpServer() {
                         scheduledHours,
                         status,
                         notes,
-                        date
+                        date: sessionDate
                     });
                 });
 

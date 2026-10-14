@@ -99,9 +99,13 @@ export function normalizeSubjects(subjects) {
 }
 
 /**
- * Calculates days between today and target date
+ * Calculates the number of calendar days from the reference date to a target.
+ * Date-only values use UTC consistently. By default this preserves the
+ * existing "days until" behavior used for exam dates. Goal-plan end dates are
+ * inclusive and pass { includeReferenceDate: true }, so a plan ending today
+ * still has one remaining study day.
  */
-export function calculateDaysRemaining(targetDateStr, referenceDate = new Date()) {
+export function calculateDaysRemaining(targetDateStr, referenceDate = new Date(), { includeReferenceDate = false } = {}) {
     if (!targetDateStr || typeof targetDateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(targetDateStr.trim())) {
         throw new Error(`Invalid exam date format: "${targetDateStr}". Please use YYYY-MM-DD.`);
     }
@@ -119,14 +123,58 @@ export function calculateDaysRemaining(targetDateStr, referenceDate = new Date()
 
     // Parse YYYY-MM-DD components directly to avoid timezone shift
     const utcTarget = Date.UTC(targetYear, targetMonth - 1, targetDay);
-    const utcToday = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+    const utcToday = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
 
     const diffDays = Math.round((utcTarget - utcToday) / (1000 * 60 * 60 * 24));
     if (diffDays < 0) {
         throw new Error("Exam date cannot be in the past.");
     }
 
-    return Math.max(1, diffDays);
+    return Math.max(1, diffDays + (includeReferenceDate ? 1 : 0));
+}
+
+function addUtcCalendarDays(dateOnly, days) {
+    if (typeof dateOnly !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateOnly) || !Number.isInteger(days)) {
+        throw new Error("Cannot calculate a plan date from invalid date metadata.");
+    }
+    const [year, month, day] = dateOnly.split("-").map(Number);
+    const base = new Date(0);
+    base.setUTCHours(0, 0, 0, 0);
+    base.setUTCFullYear(year, month - 1, day);
+    if (base.getUTCFullYear() !== year || base.getUTCMonth() !== month - 1 || base.getUTCDate() !== day) {
+        throw new Error("Cannot calculate a plan date from invalid date metadata.");
+    }
+    const date = new Date(base.getTime());
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+}
+
+/** Resolve a numbered plan day to its UTC calendar date (Day 1 is startDate). */
+export function resolvePlanDayDate(plan, dayNumber) {
+    if (!Number.isInteger(dayNumber)) {
+        throw new Error("dayNumber must be a whole number within the plan duration.");
+    }
+    const durationDays = Number(plan?.durationDays);
+    if (!Number.isInteger(durationDays) || durationDays < 1) {
+        throw new Error("This plan has no valid duration for resolving a plan day.");
+    }
+    if (dayNumber < 1 || dayNumber > durationDays) {
+        throw new Error(`dayNumber must be between 1 and ${durationDays} for this plan.`);
+    }
+
+    let startDate = plan.startDate;
+    if (!startDate && typeof plan.createdAt === "string") {
+        startDate = plan.createdAt.slice(0, 10);
+    }
+    // Legacy plans without creation metadata can be anchored from their
+    // inclusive end date and duration without changing stored data.
+    if (!startDate && typeof plan.goalEndDate === "string") {
+        startDate = addUtcCalendarDays(plan.goalEndDate, -(durationDays - 1));
+    }
+    if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+        throw new Error("The plan start date is unavailable. Please provide an explicit session date.");
+    }
+    return addUtcCalendarDays(startDate, dayNumber - 1);
 }
 
 /**
@@ -192,11 +240,10 @@ export function createPlan({
     const durationSource = hasExamDate ? "exam-deadline" : (durationDays === undefined || durationDays === null ? "recommended" : "user");
     const totalAvailableHours = Math.round(daysRemaining * dailyHours * 10) / 10;
     const createdAt = new Date(referenceDate).toISOString();
-    const goalEndDate = hasExamDate ? null : new Date(Date.UTC(
-        new Date(referenceDate).getUTCFullYear(),
-        new Date(referenceDate).getUTCMonth(),
-        new Date(referenceDate).getUTCDate() + planDurationDays
-    )).toISOString().slice(0, 10);
+    const startDate = createdAt.slice(0, 10);
+    // Goal duration counts the start date as Day 1: seven days beginning
+    // October 14 end on October 20.
+    const goalEndDate = hasExamDate ? null : addUtcCalendarDays(startDate, planDurationDays - 1);
 
     // Calculate priority weights
     let totalWeight = 0;
@@ -257,6 +304,7 @@ export function createPlan({
     return {
         planId,
         createdAt,
+        startDate,
         examDate: hasExamDate ? examDate : null,
         durationDays: planDurationDays,
         durationSource,
@@ -582,9 +630,14 @@ export function adaptPlan(plan, {
         plan.dailyAvailableHours = hours;
     }
 
+    const derivedGoalEndDate = !plan.examDate && !plan.goalEndDate && typeof plan.createdAt === "string"
+        ? addUtcCalendarDays(plan.startDate || plan.createdAt.slice(0, 10), getGoalDays(plan.durationDays) - 1)
+        : null;
     const daysRemaining = plan.examDate
         ? calculateDaysRemaining(plan.examDate, referenceDate)
-        : (plan.goalEndDate ? calculateDaysRemaining(plan.goalEndDate, referenceDate) : getGoalDays(plan.durationDays));
+        : ((plan.goalEndDate || derivedGoalEndDate)
+            ? calculateDaysRemaining(plan.goalEndDate || derivedGoalEndDate, referenceDate, { includeReferenceDate: true })
+            : getGoalDays(plan.durationDays));
     plan.daysRemaining = daysRemaining;
 
     const availableHoursCapacity = Math.round(daysRemaining * plan.dailyAvailableHours * 10) / 10;

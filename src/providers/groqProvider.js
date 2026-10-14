@@ -2,6 +2,18 @@
 import Groq from "groq-sdk";
 import { BaseProvider } from "./baseProvider.js";
 
+/** Parse a Groq tool-call argument payload without allowing malformed data through. */
+export function parseGroqToolCallArguments(args, toolName = "unknown") {
+    if (typeof args !== "string") return args || {};
+    try {
+        return JSON.parse(args);
+    } catch {
+        const error = new Error(`Groq returned invalid arguments for tool "${toolName}".`);
+        error.code = "MALFORMED_TOOL_CALL_JSON";
+        throw error;
+    }
+}
+
 export class GroqProvider extends BaseProvider {
     constructor(config = {}) {
         super(config);
@@ -101,17 +113,7 @@ export class GroqProvider extends BaseProvider {
 
         const toolCalls = (assistantMessage.tool_calls || []).map(
             (call, index) => {
-                let args = call.function?.arguments || {};
-
-                if (typeof args === "string") {
-                    try {
-                        args = JSON.parse(args);
-                    } catch {
-                        throw new Error(
-                            `Groq returned invalid arguments for tool "${call.function?.name}".`
-                        );
-                    }
-                }
+                const args = parseGroqToolCallArguments(call.function?.arguments || {}, call.function?.name);
 
                 return {
                     id: call.id || `groq_call_${index}_${Date.now()}`,

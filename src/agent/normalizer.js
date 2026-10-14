@@ -495,6 +495,8 @@ export function isSessionRecordingIntent(text) {
     }
 
     const sessionPatterns = [
+        /\b(?:i\s+)?missed\s+(?:plan\s+)?day\s+\d+\b/i,
+        /\bday\s+\d+\s+(?:was\s+)?missed\b/i,
         /\b(?:record|log|track|mark|enter|add|note)\b.*?\b(?:study\s+session|session|hours?\s+(?:studied|spent)|missed\s+session|completed\s+session)\b/i,
         /\b(?:recorded|logged)\b.*?\b(?:session|hours?\s+studied)\b/i,
         /\b(?:completed|missed)\s+(?:\d+(?:\.\d+)?\s*(?:hours?|hrs?)\s+)?(?:study\s+)?session\b/i,
@@ -681,6 +683,13 @@ export function extractExplicitSessionDate(text) {
         if (normalizedDate && isDateAssociatedWithSession(normalizedDate, text)) return normalizedDate;
     }
     return null;
+}
+
+/** Return a user-mentioned numbered plan day, such as "Day 2". */
+export function extractExplicitPlanDayNumber(text) {
+    if (typeof text !== "string" || !text.trim()) return null;
+    const match = text.match(/\bday\s+(\d+)\b/i);
+    return match ? Number(match[1]) : null;
 }
 
 /** Extract a missed amount and intended session duration when the user states them. */
@@ -1096,8 +1105,39 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
         const explicitSessionDate = extractExplicitSessionDate(textToScan);
         if (explicitSessionDate) {
             normalized.date = explicitSessionDate;
+            // A supplied calendar date is authoritative even if the request
+            // also mentions a plan-day number.
+            delete normalized.dayNumber;
         } else if (normalized.date !== undefined && shouldOmitSessionDate(normalized.date, userText, conversation)) {
             delete normalized.date;
+        }
+
+        let explicitPlanDay = extractExplicitPlanDayNumber(textToScan);
+        const isShortClarification = textToScan.trim().length > 0 && textToScan.trim().length <= 48 &&
+            !/\b(?:record|log|track|mark|enter|add|missed|completed|studied|study|create|make|build|generate|adapt|adjust|update|show|retrieve|get|view)\b/i.test(textToScan);
+        if (explicitPlanDay === null && (isShortClarification || !textToScan.trim()) && Array.isArray(conversation)) {
+            for (let index = conversation.length - 1; index >= 0; index--) {
+                const item = conversation[index];
+                if (item?.role !== "user" || typeof item.content !== "string") continue;
+                explicitPlanDay = extractExplicitPlanDayNumber(item.content);
+                if (explicitPlanDay !== null) break;
+            }
+        }
+        if (!explicitSessionDate && explicitPlanDay !== null) {
+            normalized.dayNumber = explicitPlanDay;
+            // Do not allow a model-invented date to override the numbered day.
+            delete normalized.date;
+        } else if (!textToScan.trim() && !Array.isArray(conversation) && Number.isInteger(normalized.dayNumber)) {
+            // MCP client performs a second schema-normalization pass after the
+            // agent has resolved the user's day reference. Preserve that
+            // normalized value at the transport boundary.
+        } else if (!textToScan.trim() && Array.isArray(conversation) &&
+            !conversation.some(item => item?.role === "user" && typeof item.content === "string" && item.content.trim()) &&
+            Number.isInteger(normalized.dayNumber)) {
+            // Also preserve a normalized value when context contains only
+            // system messages and no user text.
+        } else {
+            delete normalized.dayNumber;
         }
 
         if (String(normalized.status || "").toLowerCase() === "missed") {
