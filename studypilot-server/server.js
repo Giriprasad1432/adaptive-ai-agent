@@ -458,7 +458,6 @@ if (transportMode === "stdio") {
             void transport.close();
             void mcp.close();
         };
-        res.once("finish", cleanup);
         res.once("close", cleanup);
 
         try {
