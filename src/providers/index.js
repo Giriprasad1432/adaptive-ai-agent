@@ -41,7 +41,17 @@ class ResilientGroqProvider extends BaseProvider {
             try {
                 return await this.underlying.chat(params);
             } catch (err) {
-                console.warn("[Groq] Call failed, using built-in assistant fallback:", err.message);
+                console.warn("[Groq] Call failed, attempting backup model:", err.message);
+                const currentModel = this.underlying.model;
+                const backupModel = currentModel === "openai/gpt-oss-20b" ? "qwen/qwen3.8-27b" : "openai/gpt-oss-20b";
+                try {
+                    return await this.underlying.chat({
+                        ...params,
+                        options: { ...params.options, model: backupModel }
+                    });
+                } catch (backupErr) {
+                    console.warn("[Groq] Backup model also failed, using built-in assistant fallback:", backupErr.message);
+                }
             }
         }
         return await this.fallback.chat(params);

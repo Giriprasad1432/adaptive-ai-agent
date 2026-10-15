@@ -75,7 +75,7 @@ adaptive-ai-agent/
 │   │   ├── App.jsx                 # Markdown-enabled chat interface with activity traces
 │   │   └── App.css                 # Dark-mode theme, glassmorphism, & code block styling
 │   └── vite.config.js              # Proxies /api requests to port 3000
-└── test/                           # 14 deterministic test suites
+└── test/                           # 15 deterministic test suites
 ```
 
 ---
@@ -132,6 +132,8 @@ npm start
 ```
 *Backend runs on `http://localhost:3000`.*
 
+`npm run dev` watches backend JavaScript under `src/` and `studypilot-server/`; persisted files under `studypilot-server/data/` do not trigger a restart.
+
 In Terminal 2 (Frontend Demo):
 ```bash
 cd frontend
@@ -143,7 +145,7 @@ npm run dev
 
 ## 🧪 Comprehensive Test Suite
 
-The `npm test` command runs these 14 test files:
+The `npm test` command runs these 15 test files:
 
 ```bash
 npm test
@@ -152,18 +154,19 @@ npm test
 ### Test Suites Included:
 1. `test/groq_provider.test.js`: Rate-limit backoff, timeouts, key sanitization, parallel tool calls.
 2. `test/demo_provider.test.js`: Offline provider greetings and missed-session amount mapping.
-3. `test/academic_tutoring.test.js`: General-purpose multi-subject Q&A, debugging assistance & multi-turn aggregation.
-4. `test/user_preferences.test.js`: User personalization, preference persistence, and user isolation.
-5. `test/reset_learning_data.test.js`: Confirmed single-plan deletion and global reset using isolated temporary data.
-6. `test/expanded_mcp_tools.test.js`: Quiz creation, mastery scoring, weak topic detection, progress aggregation.
-7. `test/argument_normalization.test.js`: Comprehensive schema normalizer and intent verification.
-8. `test/studypilot_mcp.test.js`: Stdio MCP protocol contract and plan accounting.
-9. `test/failure_handling.test.js`: Symmetric partial success handling and tool timeouts.
-10. `test/phase3_regressions.test.js`: Regression suite covering plan IDs, date recovery, and capacity bounds.
-11. `test/study_plan_dates_recovery.test.js`: Inclusive date bounds, Day N mapping, and malformed JSON recovery.
-12. `test/api_contract.test.js`: Express HTTP API contracts (`/api/health`, `/api/tools`, `/api/chat`).
-13. `test/agent_evaluation.test.js`: End-to-end autonomous agent multi-step evaluation.
-14. `test/studypilot_http.test.js`: Streamable HTTP MCP server verification (`/mcp` endpoint) & Bearer token auth.
+3. `test/conversation_regressions.test.js`: Ambiguous multi-day progress clarification and Groq-compatible tool history.
+4. `test/academic_tutoring.test.js`: General-purpose multi-subject Q&A, debugging assistance & multi-turn aggregation.
+5. `test/user_preferences.test.js`: User personalization, preference persistence, and user isolation.
+6. `test/reset_learning_data.test.js`: Confirmed single-plan deletion and global reset using isolated temporary data.
+7. `test/expanded_mcp_tools.test.js`: Quiz creation, mastery scoring, weak topic detection, progress aggregation.
+8. `test/argument_normalization.test.js`: Comprehensive schema normalizer and intent verification.
+9. `test/studypilot_mcp.test.js`: Stdio MCP protocol contract and plan accounting.
+10. `test/failure_handling.test.js`: Symmetric partial success handling and tool timeouts.
+11. `test/phase3_regressions.test.js`: Regression suite covering plan IDs, date recovery, and capacity bounds.
+12. `test/study_plan_dates_recovery.test.js`: Inclusive date bounds, Day N mapping, and malformed JSON recovery.
+13. `test/api_contract.test.js`: Express HTTP API contracts (`/api/health`, `/api/tools`, `/api/chat`).
+14. `test/agent_evaluation.test.js`: End-to-end autonomous agent multi-step evaluation.
+15. `test/studypilot_http.test.js`: Streamable HTTP MCP server verification (`/mcp` endpoint) & Bearer token auth.
 
 
 ---

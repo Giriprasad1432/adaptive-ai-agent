@@ -193,7 +193,9 @@ export class AdaptiveAgent {
         ];
 
         if (Array.isArray(messages) && messages.length > 0) {
-            for (const msg of messages) {
+            // Bound conversation history to the most recent 8 turns so requests never exceed model input token limits (e.g. Groq 7k ITPM)
+            const recentMessages = messages.length > 8 ? messages.slice(-8) : messages;
+            for (const msg of recentMessages) {
                 if (msg.role && (msg.content !== undefined || msg.tool_calls)) {
                     conversation.push(msg);
                 }

@@ -12,6 +12,7 @@ const agent = {
     async run(input) {
         captured.push(input);
         if (input.message === "simulate failure") return { reply: "Action Failed: plan unavailable.", success: false, partialSuccess: false, rounds: 1, steps: [{ type: "tool_result", isError: true }] };
+        if (input.message === "simulate clarification") return { reply: "Which session should I log?", success: false, needsClarification: true, rounds: 0, steps: [{ type: "clarification_required" }] };
         if (input.message === "simulate exception") throw new Error("agent unavailable");
         if (input.message === "create active plan") return { reply: "Created.", success: true, activePlanId: "dbms-deadbeef", rounds: 1, steps: [] };
         return { reply: "Your plan is at 0% progress.", success: true, rounds: 2, steps: [{ type: "tool_result", content: "verified fixture" }] };
@@ -55,7 +56,7 @@ try {
     assert.equal(chat.status, 200);
     assert.deepEqual(await chat.json(), {
         reply: "Your plan is at 0% progress.", success: true, partialSuccess: false, rounds: 2,
-        steps: [{ type: "tool_result", content: "verified fixture" }], conversationId: "api-session-0001"
+        needsClarification: false, steps: [{ type: "tool_result", content: "verified fixture" }], conversationId: "api-session-0001"
     });
     assert.deepEqual(captured[0], { message: chatInput.message, messages: chatInput.messages }, "API must pass user message and conversational context unchanged");
 
@@ -77,6 +78,12 @@ try {
     });
     assert.equal(failedOperation.status, 200);
     assert.equal((await failedOperation.json()).success, false, "A failed agent action must not be returned as success");
+
+    const clarificationResponse = await fetch(`${base}/api/chat`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "simulate clarification" })
+    });
+    const clarificationData = await clarificationResponse.json();
+    assert.equal(clarificationData.needsClarification, true, "The API must preserve the agent's clarification state for the frontend");
 
     const exception = await fetch(`${base}/api/chat`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "simulate exception" })

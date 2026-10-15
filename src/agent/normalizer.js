@@ -291,7 +291,8 @@ export function extractExplicitPlanId(text, conversation = []) {
         "my", "our", "new", "each", "details", "data", "changes", "now", "because",
         "so", "as", "if", "when", "while", "please", "report", "show", "get", "retrieve",
         "progress", "date", "exam", "examdate", "exam_date", "exam-date",
-        "id", "identifier", "number", "name", "planid", "plan_id"
+        "id", "identifier", "number", "name", "planid", "plan_id",
+        "remaining", "hours", "hour", "status", "schedule", "workload", "overview", "metrics"
     ]);
     // These are ordinary references to a plan, not identifiers. Keep this
     // separate from STOP_WORDS so a user can still explicitly choose one as

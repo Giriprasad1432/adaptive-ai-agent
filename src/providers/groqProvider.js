@@ -79,11 +79,15 @@ export class GroqProvider extends BaseProvider {
 
     isRetriableError(error) {
         if (!error) return false;
+        const msg = String(error.message || "").toLowerCase();
+        // Daily token limit (TPD) errors cannot be resolved by short retries
+        if (msg.includes("tokens per day") || msg.includes("tpd") || msg.includes("please try again in")) {
+            return false;
+        }
         const status = error.status || error.statusCode;
         if (status === 429 || status === 503 || status === 500) {
             return true;
         }
-        const msg = String(error.message || "").toLowerCase();
         if (
             msg.includes("rate limit") ||
             msg.includes("too many requests") ||
@@ -157,11 +161,22 @@ export class GroqProvider extends BaseProvider {
 
     async checkHealth() {
         try {
+            if (typeof this.client?.models?.list === "function") {
+                const list = await this.executeWithRetry(
+                    () => this.client.models.list(),
+                    "Groq health check"
+                );
+                return {
+                    available: true,
+                    provider: "groq",
+                    model: this.model,
+                    verified: list.data?.some(m => m.id === this.model)
+                };
+            }
             const model = await this.executeWithRetry(
                 () => this.client.models.retrieve(this.model),
                 "Groq health check"
             );
-
             return {
                 available: true,
                 provider: "groq",

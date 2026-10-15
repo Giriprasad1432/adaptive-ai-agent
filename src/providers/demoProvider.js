@@ -1,6 +1,6 @@
 import { BaseProvider } from "./baseProvider.js";
 import { formatGroundedRetrievalSummary } from "../agent/consistencyChecker.js";
-import { isEducationalTutoringIntent, isSessionRecordingIntent, extractExplicitPlanDayNumber } from "../agent/normalizer.js";
+import { isEducationalTutoringIntent, isSessionRecordingIntent, isAdaptationIntent, extractExplicitPlanDayNumber } from "../agent/normalizer.js";
 
 /**
  * Built-in Rule-Based / Demo AI Provider for StudyPilot.
@@ -749,10 +749,11 @@ function extractSubjectFromText(text) {
             }
             if (subject === "Mathematics" && !lower.includes("mathematics") && !lower.includes("math")) {
                 for (let i = messages.length - 1; i >= 0; i--) {
+                    if (messages[i]?.role !== "user") continue;
                     const content = String(messages[i]?.content || "").toLowerCase();
                     for (const c of common) {
                         if (content.includes(c)) {
-                            subject = c.charAt(0).toUpperCase() + c.slice(1);
+                            subject = c === "dbms" ? "DBMS" : c.charAt(0).toUpperCase() + c.slice(1);
                             break;
                         }
                     }
@@ -774,6 +775,28 @@ function extractSubjectFromText(text) {
                             status: isMissed ? "missed" : "completed",
                             ...(dayNumber ? { dayNumber } : {}),
                             notes: userMsg
+                        }
+                    }
+                ]
+            };
+        }
+
+        // 2.35 Adapt study plan intent
+        if (isAdaptationIntent(userMsg) ||
+            /\b(?:adapt|change|adjust|rebalance|modify|recalculate)\b.{0,40}\b(?:plan|schedule|daily|hours?|hrs?|pace)\b/i.test(lower) ||
+            /\b(?:change.*to\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\b)/i.test(lower)) {
+            const hoursMatch = userMsg.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
+            const newDailyAvailableHours = hoursMatch ? parseFloat(hoursMatch[1]) : undefined;
+            return {
+                role: "assistant",
+                content: "",
+                toolCalls: [
+                    {
+                        id: `call_adapt_${Date.now()}`,
+                        name: "adapt_study_plan",
+                        arguments: {
+                            reason: userMsg,
+                            ...(newDailyAvailableHours ? { newDailyAvailableHours } : {})
                         }
                     }
                 ]

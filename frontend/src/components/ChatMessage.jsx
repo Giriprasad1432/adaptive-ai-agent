@@ -160,7 +160,7 @@ export const ChatMessage = React.memo(function ChatMessage({
           )}
 
           {/* Failure Notice */}
-          {isAssistant && message.success === false && (
+          {isAssistant && message.success === false && !message.needsClarification && (
             <div className="message-failure-alert" role="alert">
               <div className="failure-alert-body">
                 <span className="failure-icon" aria-hidden="true">⚠</span>

@@ -29,4 +29,12 @@ assert.equal(missed.toolCalls[0].arguments.missedHours, 1);
 assert.equal(missed.toolCalls[0].arguments.scheduledHours, 1);
 assert.equal(missed.toolCalls[0].arguments.status, "missed");
 
-console.log("✓ Demo provider handles greetings and carries missed-hour amounts accurately");
+const quizAcknowledgement = await provider.chat({
+    messages: [
+        { role: "assistant", content: "Practice Quiz: DBMS\nQuestion 1: What is normalization?" },
+        { role: "user", content: "ok nice" }
+    ]
+});
+assert.match(quizAcknowledgement.content, /send your answers/i);
+
+console.log("✓ Demo provider handles greetings, missed-hour amounts, and quiz acknowledgments");

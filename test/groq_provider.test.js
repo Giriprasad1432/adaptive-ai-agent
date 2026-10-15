@@ -185,6 +185,30 @@ assert.equal(parallelResponse.toolCalls.length, 2);
 assert.equal(parallelResponse.toolCalls[0].name, "record_study_session");
 assert.equal(parallelResponse.toolCalls[1].name, "get_study_plan");
 
+// 7.1 Historical tool calls always use Groq's required JSON-string arguments
+let capturedHistory;
+const historyProvider = new GroqProvider({
+    apiKey: "dummy-key-for-unit-test",
+    client: {
+        chat: { completions: { async create({ messages }) {
+            capturedHistory = messages;
+            return { choices: [{ message: { role: "assistant", content: "Continuing." } }] };
+        } } }
+    }
+});
+await historyProvider.chat({
+    messages: [
+        { role: "assistant", content: "", tool_calls: [{ id: "call-history", function: { name: "record_study_session", arguments: { hoursSpent: 1, status: "completed" } } }] },
+        { role: "tool", tool_call_id: "call-history", content: "Recorded." },
+        { role: "user", content: "Show progress" }
+    ]
+});
+const historicalArguments = capturedHistory[0].tool_calls[0].function.arguments;
+assert.equal(typeof historicalArguments, "string");
+assert.deepEqual(JSON.parse(historicalArguments), { hoursSpent: 1, status: "completed" });
+assert.equal(capturedHistory[0].tool_calls[0].id, "call-history");
+assert.equal(capturedHistory[0].tool_calls[0].type, "function");
+
 // 8. Rate limit (429) retry & recovery
 let attempts = 0;
 const mockRateLimitClient = {
