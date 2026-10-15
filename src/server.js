@@ -130,7 +130,7 @@ export function createApp({ provider, mcpClient, agent } = {}) {
 
     app.post("/api/chat", async (req, res) => {
         try {
-            const { message, messages, conversationId } = req.body;
+            const { message, messages, conversationId, activePlanId } = req.body;
             if (!message || typeof message !== "string") {
                 return res.status(400).json({ error: "A valid message is required." });
             }
@@ -139,18 +139,23 @@ export function createApp({ provider, mcpClient, agent } = {}) {
                 ? conversationId
                 : randomUUID();
             const agentOptions = { message, messages };
-            const previousActivePlanId = activePlansByConversation.get(sessionId);
-            if (previousActivePlanId) agentOptions.activePlanId = previousActivePlanId;
+            const effectiveActivePlanId = activePlanId || activePlansByConversation.get(sessionId);
+            if (effectiveActivePlanId) agentOptions.activePlanId = effectiveActivePlanId;
             const result = await resolvedAgent.run(agentOptions);
-            if (result.activePlanId) activePlansByConversation.set(sessionId, result.activePlanId);
+            const finalPlanId = result.activePlanId || effectiveActivePlanId;
+            if (finalPlanId) activePlansByConversation.set(sessionId, finalPlanId);
             const responsePayload = {
                 reply: result.reply,
                 success: result.success,
                 partialSuccess: Boolean(result.partialSuccess),
+                needsClarification: Boolean(result.needsClarification),
                 rounds: result.rounds,
                 steps: result.steps,
                 conversationId: sessionId
             };
+            if (finalPlanId) {
+                responsePayload.activePlanId = finalPlanId;
+            }
             if (Array.isArray(result.quickReplies) && result.quickReplies.length > 0) {
                 responsePayload.quickReplies = result.quickReplies;
             }

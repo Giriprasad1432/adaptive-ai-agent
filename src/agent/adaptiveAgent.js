@@ -1,5 +1,5 @@
 import { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
-import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, isPlanListingIntent, extractExplicitPlanId, isPlanCreationContinuation } from "./normalizer.js";
+import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessionRecordingIntent, isPlanListingIntent, extractExplicitPlanId, extractExplicitPlanDayNumber, isPlanCreationContinuation, isMultiDayCompletionStatement } from "./normalizer.js";
 import { validateToolArguments, verifyToolResult } from "./validator.js";
 import { verifyFinalAnswerConsistency, stripMetaPreamble, formatGroundedPlanSummary, formatGroundedPlanList, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
 
@@ -18,6 +18,63 @@ function matchingPlansByMentionedSubject(plans, message) {
         const escaped = String(subject).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         return escaped && new RegExp(`\\b${escaped}\\b`, "i").test(message);
     }));
+}
+
+function getPendingMultiDayCompletionRequest(messages) {
+    if (!Array.isArray(messages)) return null;
+    const lastAssistantIndex = messages.map(item => item?.role).lastIndexOf("assistant");
+    const lastAssistant = messages[lastAssistantIndex];
+    const clarificationText = String(lastAssistant?.content || "");
+    if (!/\bone plan day\b/i.test(clarificationText) || !/\bhours?\s+you\s+studied\b/i.test(clarificationText)) return null;
+    for (let index = lastAssistantIndex - 1; index >= 0; index--) {
+        const item = messages[index];
+        if (item?.role === "user" && isMultiDayCompletionStatement(item.content)) return item.content;
+    }
+    return null;
+}
+
+function isUnspecifiedBatchCompletionReply(message) {
+    if (typeof message !== "string" || !message.trim()) return false;
+    const acknowledgesBatch = /\b(?:yeah|yes|yep|yah|right|correct|exactly)\b/i.test(message) &&
+        /\b(?:each|every|all)\b.{0,25}\b(?:days?|sessions?)\b/i.test(message) &&
+        /\b(?:completed|finished|done|studied)\b/i.test(message);
+    const dayReferences = message.match(/\bday\s*\d+\b/gi) || [];
+    const givesMultipleDays = dayReferences.length > 1;
+    const givesDayOrHours = dayReferences.length > 0 || /\b\d+(?:\.\d+)?\s*(?:hours?|hrs?)\b/i.test(message);
+    return (acknowledgesBatch && !givesDayOrHours) || givesMultipleDays;
+}
+
+function extractPerDayHours(text) {
+    if (typeof text !== "string") return null;
+    const match = text.match(/\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:each|per\s+day)\b|\b(?:each|per\s+day)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
+    const hours = match ? Number(match[1] || match[2]) : NaN;
+    return Number.isFinite(hours) && hours > 0 ? hours : null;
+}
+
+function getRecentRecordedCompletedSessionContext(messages) {
+    if (!Array.isArray(messages)) return null;
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const item = messages[index];
+        if (item?.role === "user") {
+            const text = String(item.content || "");
+            const isRelatedDayFollowUp = (/\bday\s*\d+\b/i.test(text) || /\b(?:add|record|log|track|mark|enter)\b/i.test(text)) &&
+                (/\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\b/i.test(text) || /\bday\s*\d+\b/i.test(text));
+            if (isRelatedDayFollowUp || isMultiDayCompletionStatement(text)) continue;
+            break;
+        }
+        if (item?.role !== "assistant") continue;
+        const content = String(item.content || "");
+        const match = content.match(/\b(?:recorded|logged)\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\s+for\s+(.+?)\s*\(status:\s*completed\)/i);
+        if (match) return { subject: match[1].trim(), content };
+    }
+    return null;
+}
+
+function extractHoursFromText(text) {
+    if (typeof text !== "string") return null;
+    const match = text.match(/\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
+    const hours = match ? Number(match[1]) : NaN;
+    return Number.isFinite(hours) && hours > 0 ? hours : null;
 }
 
 function areToolArgumentsEqual(args1, args2) {
@@ -69,9 +126,57 @@ export class AdaptiveAgent {
             throw new Error("A user message or conversation history is required.");
         }
 
+        const pendingMultiDayRequest = getPendingMultiDayCompletionRequest(messages);
+        const pendingDayNumber = pendingMultiDayRequest ? extractExplicitPlanDayNumber(message) : null;
+        const pendingHours = pendingMultiDayRequest ? extractPerDayHours(pendingMultiDayRequest) : null;
+        const recentSessionContext = getRecentRecordedCompletedSessionContext(messages);
+        const recentSessionDayNumber = recentSessionContext ? extractExplicitPlanDayNumber(message) : null;
+        const recentSessionHours = recentSessionContext ? extractHoursFromText(message) : null;
+        const continuesRecentSession = Boolean(recentSessionContext && recentSessionDayNumber && recentSessionHours &&
+            !/\b(?:missed|skip|skipped)\b/i.test(message || ""));
+        const continuesPendingSession = Boolean(pendingMultiDayRequest && pendingDayNumber && pendingHours &&
+            (/\b(?:completed|finished|done|studied)\b/i.test(message || "") || /\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\b/i.test(message || "")));
+        if (pendingMultiDayRequest && isUnspecifiedBatchCompletionReply(message)) {
+            const reply = /\bday\s*\d+\b/i.test(message || "")
+                ? "I see details for more than one day. To avoid assigning a date or amount incorrectly, please send one day at a time (for example, “Day 1: 2 hours”). Nothing has been recorded yet."
+                : "Thanks—I understand that you completed those days. To log them accurately, please confirm the hours for each day (for example, “2 hours on each of the five days”) and whether they were plan days 1–5. Nothing has been recorded yet.";
+            return {
+                success: false,
+                partialSuccess: false,
+                needsClarification: true,
+                reply,
+                activePlanId,
+                steps: [{ type: "clarification_required", reason: "The follow-up confirms a batch completion but does not provide per-day hours or dates; no session was recorded.", timestamp: new Date().toISOString() }],
+                rounds: 0
+            };
+        }
+
+        if (isMultiDayCompletionStatement(message)) {
+            const reply = "I can record your study sessions, but I need the details for each day to avoid guessing. Please tell me one plan day and the hours you studied (for example, ‘Day 5: 2 hours’), and I’ll log it.";
+            return {
+                success: false,
+                partialSuccess: false,
+                needsClarification: true,
+                reply,
+                activePlanId,
+                steps: [{ type: "clarification_required", reason: "A multi-day completion needs individual session details; no session was recorded.", timestamp: new Date().toISOString() }],
+                rounds: 0
+            };
+        }
+
         const permitsPartialSuccess = allowPartialSuccess ?? this.allowPartialSuccess;
         const effectiveTimeoutMs = toolTimeoutMs ?? this.toolTimeoutMs;
         let resolvedActivePlanId = activePlanId;
+        const planResolutionText = continuesPendingSession
+            ? `${pendingMultiDayRequest} ${message}`
+            : continuesRecentSession
+                ? `${recentSessionContext.content} ${message}`
+            : message;
+        const continuationSession = continuesPendingSession
+            ? { dayNumber: pendingDayNumber, hoursSpent: pendingHours, subjectText: pendingMultiDayRequest }
+            : continuesRecentSession
+                ? { dayNumber: recentSessionDayNumber, hoursSpent: recentSessionHours, subjectText: recentSessionContext.subject }
+                : null;
 
         // 1. Fetch available tools dynamically from MCP client
         if (typeof this.mcpClient.whenReady === "function" && this.mcpClient.isConfigured?.() && !this.mcpClient.connected) {
@@ -110,6 +215,7 @@ export class AdaptiveAgent {
 
         const steps = [];
         const executedTools = [];
+        let resolvedPlanSummary = null;
         let completed = false;
         let concluded = false;
         let finalReply = "";
@@ -167,11 +273,12 @@ export class AdaptiveAgent {
 
         const hasExplicitCreateIntent = /\b(?:create|make|build|generate|set up|start|new)\b.{0,40}\b(?:study\s+plan|plan|schedule)\b/i.test(message || "");
 
-        const needsExistingPlan = !createContinuation && !resolvedActivePlanId &&
+        const needsExistingPlan = !createContinuation && (!resolvedActivePlanId || continuesPendingSession || continuesRecentSession) &&
             !concluded &&
             !hasExplicitCreateIntent &&
             !extractExplicitPlanId(message) &&
-            (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message));
+            (isRetrievalIntent(message) || isSessionRecordingIntent(message) ||
+                (continuesPendingSession && isMultiDayCompletionStatement(pendingMultiDayRequest)) || continuesRecentSession || isAdaptationIntent(message));
         if (needsExistingPlan && tools.some(tool => tool.name === "list_study_plans")) {
             steps.push({ type: "tool_executing", tool: "list_study_plans", arguments: {}, timestamp: new Date().toISOString() });
             const listing = await this.mcpClient.callTool("list_study_plans", {}, { trustedPlanId: true });
@@ -192,12 +299,16 @@ export class AdaptiveAgent {
                 completed = false;
                 concluded = true;
             } else {
-                if (listedData.plans.length === 1) resolvedActivePlanId = listedData.plans[0].planId;
+                if (listedData.plans.length === 1) {
+                    resolvedPlanSummary = listedData.plans[0];
+                    resolvedActivePlanId = listedData.plans[0].planId;
+                }
                 else if (listedData.plans.length > 1) {
-                    const subjectMatches = matchingPlansByMentionedSubject(listedData.plans, message);
+                    const subjectMatches = matchingPlansByMentionedSubject(listedData.plans, planResolutionText);
                     if (subjectMatches.length === 1) {
+                        resolvedPlanSummary = subjectMatches[0];
                         resolvedActivePlanId = subjectMatches[0].planId;
-                    } else if (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message)) {
+                    } else if (isRetrievalIntent(message) || isSessionRecordingIntent(message) || continuesPendingSession || continuesRecentSession || isAdaptationIntent(message)) {
                         finalReply = "Action Failed: I found more than one saved study plan and can't safely tell which one you mean. Which plan should I use? You can identify it by its subject or goal.";
                         completed = false;
                         concluded = true;
@@ -226,10 +337,16 @@ export class AdaptiveAgent {
 
             let providerResponse;
             try {
-                providerResponse = await this.provider.chat({
-                    messages: conversation,
-                    tools
-                });
+                if (continuesRecentSession && round === 1) {
+                    providerResponse = { content: "", toolCalls: [{ name: "record_study_session", arguments: {} }] };
+                } else if (continuesRecentSession && round > 1) {
+                    const recorded = [...executedTools].reverse().find(item => item.toolName === "record_study_session" && !item.isError && item.parsedData);
+                    providerResponse = recorded
+                        ? { content: formatGroundedSessionSummary(recorded.parsedData, recorded.toolArgs), toolCalls: [] }
+                        : await this.provider.chat({ messages: conversation, tools });
+                } else {
+                    providerResponse = await this.provider.chat({ messages: conversation, tools });
+                }
             } catch (error) {
                 // Groq can reject a generated tool call before returning a
                 // provider response when its argument string is malformed JSON.
@@ -377,10 +494,12 @@ export class AdaptiveAgent {
             conversation.push(providerResponse.rawMessage || {
                 role: "assistant",
                 content: providerResponse.content || "",
-                tool_calls: toolCalls.map(tc => ({
+                tool_calls: toolCalls.map((tc, index) => ({
+                    id: tc.id || `agent_tool_call_${round}_${index}`,
+                    type: "function",
                     function: {
                         name: tc.name,
-                        arguments: tc.arguments
+                        arguments: JSON.stringify(tc.arguments ?? {})
                     }
                 }))
             });
@@ -388,7 +507,50 @@ export class AdaptiveAgent {
             // Execute each requested tool call
             for (const call of toolCalls) {
                 let toolName = call.name;
-                const rawArgs = call.arguments || {};
+                let rawArgs = call.arguments || {};
+
+                if (continuationSession) {
+                    const planSubjects = resolvedPlanSummary?.subjects || [];
+                    const mentionedSubject = planSubjects.find(subject => {
+                        const escaped = String(subject).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                        return new RegExp(`\\b${escaped}\\b`, "i").test(`${continuationSession.subjectText} ${planResolutionText}`);
+                    });
+                    if (toolName !== "record_study_session") {
+                        steps.push({ round, type: "intent_tool_redirection", originalTool: toolName, redirectedTool: "record_study_session", reason: "The user supplied a specific study day and duration in session-recording context.", timestamp: new Date().toISOString() });
+                    }
+                    toolName = "record_study_session";
+                    rawArgs = {
+                        ...rawArgs,
+                        planId: resolvedActivePlanId,
+                        subject: mentionedSubject || (planSubjects.length === 1 ? planSubjects[0] : (recentSessionContext?.subject || rawArgs.subject)),
+                        hoursSpent: continuationSession.hoursSpent,
+                        status: "completed",
+                        dayNumber: continuationSession.dayNumber
+                    };
+                } else if (toolName === "record_study_session") {
+                    if (!rawArgs.planId && resolvedActivePlanId) {
+                        rawArgs.planId = resolvedActivePlanId;
+                    }
+                    if (!rawArgs.subject) {
+                        const planSubjects = resolvedPlanSummary?.subjects || [];
+                        if (planSubjects.length === 1) {
+                            rawArgs.subject = planSubjects[0];
+                        } else if (recentSessionContext?.subject) {
+                            rawArgs.subject = recentSessionContext.subject;
+                        }
+                    }
+                    if (!rawArgs.hoursSpent) {
+                        const extractedHours = extractHoursFromText(message);
+                        if (extractedHours) rawArgs.hoursSpent = extractedHours;
+                    }
+                    if (!rawArgs.dayNumber) {
+                        const extractedDay = extractExplicitPlanDayNumber(message);
+                        if (extractedDay) rawArgs.dayNumber = extractedDay;
+                    }
+                    if (!rawArgs.status) {
+                        rawArgs.status = /\b(?:missed|skip|skipped)\b/i.test(message) ? "missed" : "completed";
+                    }
+                }
 
                 // A short selection such as "study plan" answers the assistant's
                 // create-vs-record clarification; it must not be treated as a request

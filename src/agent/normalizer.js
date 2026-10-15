@@ -544,17 +544,31 @@ export function isSessionRecordingIntent(text) {
         return false;
     }
 
+    if (isMultiDayCompletionStatement(clean)) {
+        return false;
+    }
+
     const sessionPatterns = [
-        /\b(?:i\s+)?missed\s+(?:plan\s+)?day\s+\d+\b/i,
-        /\bday\s+\d+\s+(?:was\s+)?missed\b/i,
+        /\b(?:i\s+)?missed\s+(?:plan\s+)?day\s*\d+\b/i,
+        /\bday\s*\d+\s+(?:was\s+)?missed\b/i,
         /\b(?:record|log|track|mark|enter|add|note)\b.*?\b(?:study\s+session|session|hours?\s+(?:studied|spent)|missed\s+session|completed\s+session)\b/i,
         /\b(?:recorded|logged)\b.*?\b(?:session|hours?\s+studied)\b/i,
         /\b(?:completed|missed)\s+(?:\d+(?:\.\d+)?\s*(?:hours?|hrs?)\s+)?(?:study\s+)?session\b/i,
         /\b(?:record|log)\s+(?:that\s+)?(?:i\s+)?(?:completed|missed|studied|finished)\b/i,
-        /\b(?:studied|spent)\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?)\b.*?\b(?:record|log)\b/i
+        /\b(?:studied|spent)\s+\d+(?:\.\d+)?\s*(?:hours?|hrs?)\b.*?\b(?:record|log)\b/i,
+        /\b(?:record|log|track|mark|enter|add|note)\b.*?\bday\s*\d+\b/i,
+        /\bday\s*\d+\b.*?\b(?:completed|done|finished|studied|only)?\s*\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\b/i,
+        /\b(?:record|log|track|mark|enter|add)\b.*?\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\b/i,
+        /\b(?:completed|finished|studied)\b.*?\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|h)\b/i
     ];
 
     return sessionPatterns.some(p => p.test(clean));
+}
+
+/** Detect a multi-day completion claim that needs per-day session details. */
+export function isMultiDayCompletionStatement(text) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    return /\b\d+\s+(?:study\s+)?days?\s+(?:were\s+)?(?:completed|finished|done|studied)\b|\b(?:completed|finished|did|studied)\s+\d+\s+(?:study\s+)?days?\b/i.test(text);
 }
 
 /** True when a short user reply answers an outstanding study-plan creation question. */
@@ -741,7 +755,7 @@ export function extractExplicitSessionDate(text) {
 /** Return a user-mentioned numbered plan day, such as "Day 2". */
 export function extractExplicitPlanDayNumber(text) {
     if (typeof text !== "string" || !text.trim()) return null;
-    const match = text.match(/\bday\s+(\d+)\b/i);
+    const match = text.match(/\bday\s*(\d+)\b/i);
     return match ? Number(match[1]) : null;
 }
 
@@ -1098,6 +1112,8 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
             normalized.planId = options.activePlanId;
         } else if (!isCreateTool && currentVal && verifiedListedIds.includes(currentVal)) {
             normalized.planId = currentVal;
+        } else if (!isCreateTool && !currentVal && verifiedListedIds.length === 1) {
+            normalized.planId = verifiedListedIds[0];
         } else if (options.trustedPlanId && currentVal && !isToolName &&
             !/(?:\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|exam[_-]?date|your[_-]|placeholder|plan[_-]?id)/i.test(String(currentVal))) {
             // AdaptiveAgent marks arguments trusted only after context resolution and
@@ -1201,6 +1217,16 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
             if (explicitHours.missedHours !== null) normalized.missedHours = explicitHours.missedHours;
             if (explicitHours.scheduledHours !== null) normalized.scheduledHours = explicitHours.scheduledHours;
             else if (explicitHours.missedHours !== null) normalized.scheduledHours = explicitHours.missedHours;
+        } else {
+            if (normalized.hoursSpent === undefined || normalized.hoursSpent === null || Number.isNaN(normalized.hoursSpent)) {
+                const hrsMatch = textToScan.match(/\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
+                if (hrsMatch && Number.isFinite(Number(hrsMatch[1])) && Number(hrsMatch[1]) > 0) {
+                    normalized.hoursSpent = Number(hrsMatch[1]);
+                }
+            }
+            if (!normalized.status) {
+                normalized.status = /\b(?:missed|skip|skipped)\b/i.test(textToScan) ? "missed" : "completed";
+            }
         }
     }
 

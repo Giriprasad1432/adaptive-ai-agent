@@ -275,6 +275,7 @@ function App() {
             message,
             conversationId: activeConversationId,
             messages: history,
+            activePlanId: activePlanId || undefined,
           }),
           signal: controller.signal,
         })
@@ -300,6 +301,7 @@ function App() {
           content: answer,
           success: data.success,
           partialSuccess: data.partialSuccess,
+          needsClarification: data.needsClarification,
           steps: data.steps || [],
           quickReplies: data.quickReplies || [],
           planPreview: data.planPreview || null,
@@ -308,18 +310,22 @@ function App() {
 
         updateActiveConversationMessages((prev) => [...prev, assistantMsg])
 
-        // Check if a plan ID was created or touched
-        const planCreatedStep = data.steps?.find(
-          (s) => s.type === 'tool_result' && s.tool === 'create_study_plan' && !s.isError
-        )
-        if (planCreatedStep?.content) {
-          try {
-            const parsed = JSON.parse(planCreatedStep.content)
-            if (parsed.planId) {
-              setActivePlanId(parsed.planId)
+        if (data.activePlanId) {
+          setActivePlanId(data.activePlanId)
+        } else {
+          // Check if a plan ID was created or touched
+          const planCreatedStep = data.steps?.find(
+            (s) => s.type === 'tool_result' && s.tool === 'create_study_plan' && !s.isError
+          )
+          if (planCreatedStep?.content) {
+            try {
+              const parsed = JSON.parse(planCreatedStep.content)
+              if (parsed.planId) {
+                setActivePlanId(parsed.planId)
+              }
+            } catch {
+              // Ignore non-JSON tool content
             }
-          } catch {
-            // Ignore non-JSON tool content
           }
         }
       } catch (err) {
