@@ -6,22 +6,33 @@ import { normalizePlan } from "./planner.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+export function getDataDir() {
+    return process.env.STUDYPILOT_DATA_DIR 
+        ? path.resolve(process.cwd(), process.env.STUDYPILOT_DATA_DIR)
+        : path.resolve(__dirname, "data");
+}
+
+export function getDataFile() {
+    return path.join(getDataDir(), "studypilot_data.json");
+}
+
+export function getPreferencesFile() {
+    return path.join(getDataDir(), "studypilot_preferences.json");
+}
+
+export function getLockFile(targetFile = getDataFile()) {
+    return `${targetFile}.lock`;
+}
+
 // Default data directory inside studypilot-server/data
-const DATA_DIR = process.env.STUDYPILOT_DATA_DIR 
-    ? path.resolve(process.cwd(), process.env.STUDYPILOT_DATA_DIR)
-    : path.resolve(__dirname, "data");
-
+const DATA_DIR = path.resolve(__dirname, "data");
 export const DATA_FILE = path.join(DATA_DIR, "studypilot_data.json");
-
 export const LOCK_FILE = `${DATA_FILE}.lock`;
 
 /**
  * Ensures the data storage directory exists
  */
-/**
- * Ensures the data storage directory exists
- */
-function ensureDataDir(dir = DATA_DIR) {
+function ensureDataDir(dir = getDataDir()) {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -34,7 +45,7 @@ function ensureDataDir(dir = DATA_DIR) {
  * Automatically clears stale lock files older than staleTimeoutMs (10000ms).
  * @returns {{ fd: number, token: string, lockFile: string } | null} Lock descriptor with token, or null on timeout
  */
-export function acquireLock(maxWaitMs = 5000, retryIntervalMs = 25, staleTimeoutMs = 10000, lockFile = LOCK_FILE) {
+export function acquireLock(maxWaitMs = 5000, retryIntervalMs = 25, staleTimeoutMs = 10000, lockFile = getLockFile()) {
     ensureDataDir(path.dirname(lockFile));
     const start = Date.now();
 
@@ -120,7 +131,7 @@ export function withFileLock(fn, maxWaitMs = 5000, retryIntervalMs = 25, lockFil
  * @param {string} [targetFile=DATA_FILE]
  * @returns {Record<string, any>} All stored plans keyed by planId
  */
-export function loadAllPlans(retries = 10, retryDelayMs = 25, targetFile = DATA_FILE) {
+export function loadAllPlans(retries = 10, retryDelayMs = 25, targetFile = getDataFile()) {
     ensureDataDir(path.dirname(targetFile));
     if (!fs.existsSync(targetFile)) {
         return {};
@@ -157,7 +168,7 @@ export function loadAllPlans(retries = 10, retryDelayMs = 25, targetFile = DATA_
  * Writes to a unique temp file first, then atomically renames to targetFile.
  * Eliminates non-atomic truncation fallbacks to guarantee existing data is never corrupted.
  */
-function _saveAllPlansUnlocked(data, targetFile = DATA_FILE) {
+function _saveAllPlansUnlocked(data, targetFile = getDataFile()) {
     ensureDataDir(path.dirname(targetFile));
     const jsonContent = JSON.stringify(data, null, 2);
     const tmpFile = `${targetFile}.${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}.tmp`;
@@ -202,7 +213,7 @@ function _saveAllPlansUnlocked(data, targetFile = DATA_FILE) {
  * @param {Record<string, any>} data
  * @param {string} [targetFile=DATA_FILE]
  */
-export function saveAllPlans(data, targetFile = DATA_FILE) {
+export function saveAllPlans(data, targetFile = getDataFile()) {
     const lockFile = `${targetFile}.lock`;
     return withFileLock(() => {
         return _saveAllPlansUnlocked(data, targetFile);
@@ -215,7 +226,7 @@ export function saveAllPlans(data, targetFile = DATA_FILE) {
  * @param {string} [targetFile=DATA_FILE]
  * @returns {any | null}
  */
-export function getPlan(planId = "default", targetFile = DATA_FILE) {
+export function getPlan(planId = "default", targetFile = getDataFile()) {
     let plans = loadAllPlans(10, 25, targetFile);
     let plan = plans[planId] || null;
     if (!plan && fs.existsSync(targetFile)) {
@@ -237,7 +248,7 @@ export function getPlan(planId = "default", targetFile = DATA_FILE) {
  * @param {any} plan
  * @param {string} [targetFile=DATA_FILE]
  */
-export function savePlan(planId = "default", plan, targetFile = DATA_FILE) {
+export function savePlan(planId = "default", plan, targetFile = getDataFile()) {
     const lockFile = `${targetFile}.lock`;
     return withFileLock(() => {
         const plans = loadAllPlans(10, 25, targetFile);
@@ -248,7 +259,7 @@ export function savePlan(planId = "default", plan, targetFile = DATA_FILE) {
 }
 
 /** Create-only save: fail instead of replacing an existing plan with the same ID. */
-export function saveNewPlan(planId, plan, targetFile = DATA_FILE) {
+export function saveNewPlan(planId, plan, targetFile = getDataFile()) {
     const lockFile = `${targetFile}.lock`;
     return withFileLock(() => {
         const plans = loadAllPlans(10, 25, targetFile);
@@ -256,6 +267,22 @@ export function saveNewPlan(planId, plan, targetFile = DATA_FILE) {
         plans[planId] = plan;
         _saveAllPlansUnlocked(plans, targetFile);
         return true;
+    }, 5000, 25, lockFile);
+}
+
+/** Delete exactly one saved study plan under the plan storage lock. */
+export function deletePlan(planId, targetFile = getDataFile()) {
+    if (typeof planId !== "string" || !planId.trim()) {
+        throw new Error("A valid planId is required to delete a study plan.");
+    }
+    const lockFile = `${targetFile}.lock`;
+    return withFileLock(() => {
+        const plans = loadAllPlans(10, 25, targetFile);
+        if (!Object.hasOwn(plans, planId)) return null;
+        const deletedPlan = plans[planId];
+        delete plans[planId];
+        _saveAllPlansUnlocked(plans, targetFile);
+        return deletedPlan;
     }, 5000, 25, lockFile);
 }
 
@@ -271,7 +298,7 @@ export function saveNewPlan(planId, plan, targetFile = DATA_FILE) {
  * @param {string} [targetFile=DATA_FILE]
  * @returns {{ plan: any, result: any } | null} The persisted plan and mutator result, or null if plan not found
  */
-export function updatePlan(planId = "default", mutatorFn, targetFile = DATA_FILE) {
+export function updatePlan(planId = "default", mutatorFn, targetFile = getDataFile()) {
     const lockFile = `${targetFile}.lock`;
     return withFileLock(() => {
         const plans = loadAllPlans(10, 25, targetFile);
@@ -301,7 +328,7 @@ export const PREFERENCES_FILE = path.join(DATA_DIR, "studypilot_preferences.json
  * @param {string} [targetFile=PREFERENCES_FILE]
  * @returns {Record<string, any>}
  */
-export function loadAllPreferences(targetFile = PREFERENCES_FILE) {
+export function loadAllPreferences(targetFile = getPreferencesFile()) {
     ensureDataDir(path.dirname(targetFile));
     if (!fs.existsSync(targetFile)) {
         return {};
@@ -319,7 +346,7 @@ export function loadAllPreferences(targetFile = PREFERENCES_FILE) {
  * @param {string} [userId="default"]
  * @param {string} [targetFile=PREFERENCES_FILE]
  */
-export function getUserPreferences(userId = "default", targetFile = PREFERENCES_FILE) {
+export function getUserPreferences(userId = "default", targetFile = getPreferencesFile()) {
     const all = loadAllPreferences(targetFile);
     const existing = all[userId];
     if (existing) {
@@ -367,7 +394,7 @@ export function getUserPreferences(userId = "default", targetFile = PREFERENCES_
  * @param {Object} preferences
  * @param {string} [targetFile=PREFERENCES_FILE]
  */
-export function saveUserPreferences(userId = "default", preferences = {}, targetFile = PREFERENCES_FILE) {
+export function saveUserPreferences(userId = "default", preferences = {}, targetFile = getPreferencesFile()) {
     const lockFile = `${targetFile}.lock`;
     return withFileLock(() => {
         const all = loadAllPreferences(targetFile);
@@ -385,30 +412,26 @@ export function saveUserPreferences(userId = "default", preferences = {}, target
 }
 
 /**
- * Reset stored user data (plans, preferences) cleanly under file lock.
- * Only invoked when user explicitly requests a reset.
- * @param {string} [userId="default"]
- * @param {string} [targetPlanFile=DATA_FILE]
- * @param {string} [targetPrefsFile=PREFERENCES_FILE]
+ * Reset all locally stored plans and preferences under their file locks.
+ * Plan records are not user-scoped, so this operation is deliberately global.
+ * Callers must obtain explicit confirmation before invoking it.
  */
-export function resetLearningData(userId = "default", targetPlanFile = DATA_FILE, targetPrefsFile = PREFERENCES_FILE) {
-    // 1. Reset plans under plan file lock
+export function resetAllLearningData(targetPlanFile = getDataFile(), targetPrefsFile = getPreferencesFile()) {
+    // Reset plans under plan file lock.
     const planLock = `${targetPlanFile}.lock`;
     withFileLock(() => {
         _saveAllPlansUnlocked({}, targetPlanFile);
     }, 5000, 25, planLock);
 
-    // 2. Reset preferences under prefs file lock
+    // Reset preferences under prefs file lock.
     const prefsLock = `${targetPrefsFile}.lock`;
     withFileLock(() => {
-        const all = loadAllPreferences(targetPrefsFile);
-        delete all[userId];
-        _saveAllPlansUnlocked(all, targetPrefsFile);
+        _saveAllPlansUnlocked({}, targetPrefsFile);
     }, 5000, 25, prefsLock);
 
     return {
         success: true,
-        message: `Learning data and study plans have been cleanly reset for user "${userId}".`
+        message: "All locally stored study plans and learning preferences have been reset."
     };
 }
 

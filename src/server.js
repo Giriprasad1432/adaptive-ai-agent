@@ -52,6 +52,9 @@ export function createApp({ provider, mcpClient, agent } = {}) {
         if (!resolvedMcpClient || typeof resolvedMcpClient.callTool !== "function") {
             return res.status(503).json({ error: "MCP tool client is not configured for direct execution." });
         }
+        if (typeof resolvedMcpClient.whenReady === "function" && resolvedMcpClient.isConfigured?.() && !resolvedMcpClient.connected) {
+            await resolvedMcpClient.whenReady(5000);
+        }
         try {
             const result = await resolvedMcpClient.callTool(toolName, args, { trustedPlanId: true });
             if (result.isError) {
@@ -74,6 +77,13 @@ export function createApp({ provider, mcpClient, agent } = {}) {
 
     app.get("/api/plans/:id", async (req, res) => {
         await invokeMcpTool(res, "get_study_plan", { planId: req.params.id });
+    });
+
+    app.delete("/api/plans/:id", async (req, res) => {
+        if (req.body?.confirm !== true) {
+            return res.status(400).json({ error: "Explicit confirmation is required to delete this study plan." });
+        }
+        await invokeMcpTool(res, "delete_study_plan", { planId: req.params.id, confirm: true });
     });
 
     app.post("/api/plans", async (req, res) => {
@@ -112,8 +122,10 @@ export function createApp({ provider, mcpClient, agent } = {}) {
     });
 
     app.post("/api/reset", async (req, res) => {
-        const userId = typeof req.body?.userId === "string" ? req.body.userId : "default";
-        await invokeMcpTool(res, "reset_learning_data", { confirm: true, userId });
+        if (req.body?.confirm !== true) {
+            return res.status(400).json({ error: "Explicit confirmation is required to reset all learning data." });
+        }
+        await invokeMcpTool(res, "reset_learning_data", { confirm: true });
     });
 
     app.post("/api/chat", async (req, res) => {
@@ -158,16 +170,15 @@ export function createApp({ provider, mcpClient, agent } = {}) {
 export function startServer({ port = process.env.PORT || 3000 } = {}) {
     const provider = getProvider();
     const mcpClient = getMcpClient();
+    if (mcpClient.isConfigured?.()) {
+        mcpClient.connect().catch(err => {
+            console.error(`[Server] MCP server startup connection notice: ${err.message}`);
+        });
+    }
     const app = createApp({ provider, mcpClient });
-    const server = app.listen(port, async () => {
+    const server = app.listen(port, () => {
         console.log(`Adaptive AI Agent backend running on port ${port}`);
-        if (mcpClient.isConfigured()) {
-            try {
-                await mcpClient.connect();
-            } catch (err) {
-                console.error(`[Server] MCP server startup connection notice: ${err.message}`);
-            }
-        } else {
+        if (!mcpClient.isConfigured?.()) {
             console.log("[Server] No MCP server command configured. Set MCP_SERVER_COMMAND to enable tools.");
         }
     });

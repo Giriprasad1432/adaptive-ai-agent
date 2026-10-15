@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
-export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanId }) {
+export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanId, mcpConnected = true }) {
   const [plans, setPlans] = useState([])
   const [activePlanId, setActivePlanId] = useState(initialActivePlanId || '')
   const [currentPlan, setCurrentPlan] = useState(null)
@@ -15,6 +15,7 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showSessionModal, setShowSessionModal] = useState(false)
   const [showAdaptModal, setShowAdaptModal] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showAdvancedCreate, setShowAdvancedCreate] = useState(false)
   const [activeDetailTab, setActiveDetailTab] = useState('sessions') // 'sessions' | 'history'
 
@@ -39,6 +40,7 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
 
   // Load plan summaries (for manual refresh / actions)
   const fetchPlans = useCallback(async () => {
+    if (!mcpConnected) return
     setLoading(true)
     setError('')
     try {
@@ -63,7 +65,7 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
     } finally {
       setLoading(false)
     }
-  }, [activePlanId])
+  }, [activePlanId, mcpConnected])
 
   // Load detailed plan (for manual refresh / actions)
   const fetchPlanDetails = useCallback(async (id) => {
@@ -89,8 +91,13 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
   }, [])
 
   useEffect(() => {
+    if (!mcpConnected) {
+      setLoading(false)
+      return
+    }
     let ignore = false
     const loadInitialPlans = async () => {
+      setLoading(true)
       try {
         const res = await fetch(`${API_BASE_URL}/api/plans`)
         if (!res.ok) throw new Error(`Failed to load plans (${res.status})`)
@@ -115,7 +122,7 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
     return () => {
       ignore = true
     }
-  }, [])
+  }, [mcpConnected])
 
   useEffect(() => {
     if (!activePlanId) return
@@ -285,7 +292,59 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
     }
   }
 
+  const handleDeletePlan = async () => {
+    if (!currentPlan) return
+    const deletedPlan = currentPlan
+    setActionLoading(true)
+    setError('')
+    setSuccessMsg('')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/plans/${encodeURIComponent(deletedPlan.planId)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      })
+      const result = await res.json()
+      if (!res.ok || result.error) {
+        throw new Error(result.error || 'Failed to delete the study plan.')
+      }
+
+      setPlans((previous) => previous.filter((plan) => plan.planId !== deletedPlan.planId))
+      setCurrentPlan(null)
+      setActivePlanId('')
+      setShowDeleteConfirm(false)
+      setSuccessMsg(result.message || `Study plan "${deletedPlan.planId}" deleted.`)
+      await fetchPlans()
+    } catch (err) {
+      setError(err.message || 'Could not delete the study plan.')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const subjectsList = currentPlan?.subjects ? Object.entries(currentPlan.subjects) : []
+
+  if (!mcpConnected) {
+    return (
+      <div className="planner-container">
+        <div className="planner-top-bar">
+          <div className="planner-heading-group">
+            <h2>Study Planner</h2>
+            <p className="planner-subtitle">
+              Organize subjects, track daily hours, and adapt schedules.
+            </p>
+          </div>
+        </div>
+        <div className="empty-state-card" style={{ textAlign: 'center', padding: '3.5rem 1.5rem', marginTop: '1.5rem' }}>
+          <div className="empty-icon" style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>⏳</div>
+          <h3 style={{ fontSize: '1.15rem', marginBottom: '0.5rem' }}>Connecting to Study Planner Tools…</h3>
+          <p style={{ color: 'var(--color-text-muted, #94a3b8)', maxWidth: 440, margin: '0 auto' }}>
+            The background MCP tool server is currently initializing. Saved plans and scheduling actions will activate automatically once connected.
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="planner-container">
@@ -434,6 +493,15 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
                 title="Practice quiz in AI Tutor"
               >
                 <span>✦ Practice Quiz</span>
+              </button>
+              <button
+                type="button"
+                className="btn-danger btn-sm"
+                onClick={() => setShowDeleteConfirm(true)}
+                disabled={actionLoading}
+                title="Delete this plan and its recorded sessions"
+              >
+                <span>Delete Plan</span>
               </button>
             </div>
           </div>
@@ -933,6 +1001,48 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showDeleteConfirm && currentPlan && (
+        <div className="modal-backdrop" role="presentation" onClick={() => !actionLoading && setShowDeleteConfirm(false)}>
+          <div className="modal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-plan-title" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 id="delete-plan-title">Delete this study plan?</h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={actionLoading}
+                aria-label="Cancel plan deletion"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <p><strong>{subjectsList.map(([name]) => name).join(', ') || 'Study plan'}</strong></p>
+              <p>Plan ID: <code>{currentPlan.planId}</code></p>
+              <p>This permanently deletes this plan and its recorded study sessions. Other plans and quiz history stay saved.</p>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={actionLoading}
+              >
+                Keep Plan
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={handleDeletePlan}
+                disabled={actionLoading}
+              >
+                {actionLoading ? 'Deleting...' : 'Delete This Plan'}
+              </button>
+            </div>
           </div>
         </div>
       )}

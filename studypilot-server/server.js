@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getPlan, loadAllPlans, saveNewPlan, updatePlan, getUserPreferences, saveUserPreferences, resetLearningData } from "./storage.js";
+import { getPlan, loadAllPlans, saveNewPlan, updatePlan, deletePlan, getUserPreferences, saveUserPreferences, resetAllLearningData } from "./storage.js";
 import { createPlan, recordSession, adaptPlan, getActiveSessionCount, resolvePlanDayDate } from "./planner.js";
 import { createQuiz, saveQuizResult, getWeakTopics, getStudyProgress, resetQuizData } from "./quizManager.js";
 
@@ -305,7 +305,39 @@ function createMcpServer() {
         }
     );
 
-    // 4. Tool: adapt_study_plan
+    // 4. Tool: delete_study_plan
+    mcp.tool(
+        "delete_study_plan",
+        "Permanently delete exactly one study plan and its recorded sessions. Require an explicit planId and confirm=true after the user has clearly confirmed deletion. Quiz history is not linked to plans and will be preserved.",
+        {
+            planId: z.string().min(1).describe("Exact ID of the plan the user selected"),
+            confirm: z.boolean().describe("Must be true only after explicit user confirmation to delete this exact plan")
+        },
+        async ({ planId, confirm }) => {
+            try {
+                if (!confirm) {
+                    return { isError: true, content: [{ type: "text", text: "Plan deletion was not confirmed. No data was changed." }] };
+                }
+                const deleted = deletePlan(planId);
+                if (!deleted) {
+                    return { isError: true, content: [{ type: "text", text: `No study plan found with ID \"${planId}\". No data was changed.` }] };
+                }
+                return {
+                    content: [{ type: "text", text: JSON.stringify({
+                        deleted: true,
+                        planId,
+                        subjects: Object.keys(deleted.subjects || {}),
+                        deletedSessionCount: (deleted.sessions || []).length,
+                        message: `Study plan \"${planId}\" and its recorded sessions were deleted.`
+                    }) }]
+                };
+            } catch (error) {
+                return { isError: true, content: [{ type: "text", text: `Failed to delete study plan: ${error.message}` }] };
+            }
+        }
+    );
+
+    // 5. Tool: adapt_study_plan
     mcp.tool(
         "adapt_study_plan",
         "Dynamically re-balance and adapt the remaining study schedule based on actual progress, missed sessions, and remaining days. ONLY invoke when the user explicitly requests to adapt, modify, adjust, re-balance, or recalculate the schedule. NEVER invoke for retrieval, inspection, or report requests ('retrieve', 'show', 'get', 'report on').",
@@ -584,12 +616,11 @@ function createMcpServer() {
     // 12. Tool: reset_learning_data
     mcp.tool(
         "reset_learning_data",
-        "Cleanly reset user study plans, session logs, preferences, and quizzes when explicitly requested by the user. NEVER call without explicit user confirmation.",
+        "Globally clear all locally stored study plans, session logs, preferences, and quiz data. This affects all users because study plans are not user-scoped. Call only after the user explicitly confirms resetting ALL data.",
         {
-            confirm: z.boolean().describe("Must be true to confirm reset"),
-            userId: z.string().optional().describe("User identifier (default: 'default')")
+            confirm: z.boolean().describe("Must be true only after explicit user confirmation to reset ALL local learning data")
         },
-        async ({ confirm, userId = "default" }) => {
+        async ({ confirm }) => {
             try {
                 if (!confirm) {
                     return {
@@ -597,7 +628,7 @@ function createMcpServer() {
                         content: [{ type: "text", text: "Reset was not confirmed. User data remains untouched." }]
                     };
                 }
-                const resetResult = resetLearningData(userId);
+                const resetResult = resetAllLearningData();
                 resetQuizData();
                 return {
                     isError: false,

@@ -17,6 +17,7 @@ const SUGGESTIONS = [
     tag: 'Personalized AI Tutor',
     title: 'Start creating my personalized study plan.',
     subtitle: 'Discover your goals, starting level, and preferred schedule first',
+    requiresPlanTools: true,
   },
   {
     id: 'tutor-question',
@@ -24,6 +25,7 @@ const SUGGESTIONS = [
     tag: 'Academic Tutoring',
     title: 'Explain recursion and dynamic programming.',
     subtitle: 'Intuitive analogies, core principles, and clean code examples',
+    requiresPlanTools: false,
   },
   {
     id: 'quiz-practice',
@@ -31,6 +33,7 @@ const SUGGESTIONS = [
     tag: 'Practice Quizzes',
     title: 'Give me a diagnostic quiz to test my level.',
     subtitle: 'Check your knowledge gaps and identify weak areas for review',
+    requiresPlanTools: true,
   },
   {
     id: 'plan-progress',
@@ -38,6 +41,7 @@ const SUGGESTIONS = [
     tag: 'Adaptive Analytics',
     title: 'Show my study plan progress and workload.',
     subtitle: 'Review completed hours, pacing against deadlines, and catch-up',
+    requiresPlanTools: true,
   },
 ]
 
@@ -83,9 +87,11 @@ function App() {
     sessionStorage.setItem('studypilot-conversation-id', conversationId)
   }, [conversationId])
 
-  // Health check polling
+  // Health check polling with fast retry during initial MCP startup
   useEffect(() => {
     let stopped = false
+    let timerId = null
+
     const checkHealth = async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/health`)
@@ -93,24 +99,30 @@ function App() {
         if (!response.ok) throw new Error('Health check failed')
         if (!stopped) {
           setHealthInfo(health)
-          setApiStatus(
-            health.providerStatus?.available && health.mcp?.connected ? 'online' : 'partial'
-          )
+          const mcpReady = Boolean(health.mcp?.connected)
+          const providerReady = Boolean(health.providerStatus?.available)
+          setApiStatus(providerReady && mcpReady ? 'online' : 'partial')
+
+          // Poll quickly (1000ms) until MCP connects, then relax to 30000ms
+          const delayMs = mcpReady ? 30000 : 1000
+          timerId = window.setTimeout(checkHealth, delayMs)
         }
       } catch {
         if (!stopped) {
           setApiStatus('offline')
+          timerId = window.setTimeout(checkHealth, 3000)
         }
       }
     }
 
     checkHealth()
-    const timer = window.setInterval(checkHealth, 30000)
     return () => {
       stopped = true
-      window.clearInterval(timer)
+      if (timerId) window.clearTimeout(timerId)
     }
   }, [])
+
+  const isMcpReady = Boolean(healthInfo?.mcp?.connected)
 
   // Clean up in-flight request on unmount
   useEffect(() => {
@@ -309,23 +321,37 @@ function App() {
                       Ask academic questions, build structured study plans, or test your mastery.
                     </p>
 
+                    {!isMcpReady && apiStatus === 'partial' && (
+                      <div className="mcp-initializing-pill" style={{ margin: '0 auto 1.25rem', padding: '0.4rem 1rem', background: 'rgba(59, 130, 246, 0.12)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: 20, fontSize: '0.82rem', color: '#93c5fd', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, maxWidth: 440 }}>
+                        <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#60a5fa' }} />
+                        <span>Planner tools connecting… Academic Q&A is ready.</span>
+                      </div>
+                    )}
+
                     <div className="suggestions-grid" role="region" aria-label="Suggested Prompts">
-                      {SUGGESTIONS.map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          className="suggestion-action-card"
-                          onClick={() => handleSelectSuggestion(item.title)}
-                          aria-label={`Ask: ${item.title}`}
-                          title={item.title}
-                        >
-                          <span className="suggestion-icon" aria-hidden="true">{item.icon}</span>
-                          <div className="suggestion-text-wrap">
-                            <strong className="suggestion-title">{item.title}</strong>
-                            <p className="suggestion-sub">{item.subtitle}</p>
-                          </div>
-                        </button>
-                      ))}
+                      {SUGGESTIONS.map((item) => {
+                        const disabled = item.requiresPlanTools && !isMcpReady
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`suggestion-action-card ${disabled ? 'disabled' : ''}`}
+                            onClick={() => !disabled && handleSelectSuggestion(item.title)}
+                            disabled={disabled}
+                            aria-label={`Ask: ${item.title}`}
+                            title={disabled ? 'Waiting for MCP planner tools to connect...' : item.title}
+                            style={disabled ? { opacity: 0.65, cursor: 'not-allowed' } : {}}
+                          >
+                            <span className="suggestion-icon" aria-hidden="true">{item.icon}</span>
+                            <div className="suggestion-text-wrap">
+                              <strong className="suggestion-title">{item.title}</strong>
+                              <p className="suggestion-sub">
+                                {disabled ? 'Initializing planner tools…' : item.subtitle}
+                              </p>
+                            </div>
+                          </button>
+                        )
+                      })}
                     </div>
                   </div>
                 ) : (
@@ -402,6 +428,7 @@ function App() {
             <StudyPlannerView
               onAskInChat={handleAskInChat}
               activePlanId={activePlanId}
+              mcpConnected={isMcpReady}
             />
           </div>
         )}

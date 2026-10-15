@@ -316,6 +316,15 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
         }
     }
 
+    if (toolName === "delete_study_plan") {
+        if (!data || data.deleted !== true || data.planId !== toolArgs.planId) {
+            return {
+                valid: false,
+                error: `delete_study_plan did not confirm deletion of requested plan \"${toolArgs.planId || "(missing)"}\".`
+            };
+        }
+    }
+
     // Verification for create_study_plan
     if (toolName === "create_study_plan") {
         if (!data || typeof data !== "object") {

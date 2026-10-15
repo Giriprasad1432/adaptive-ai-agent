@@ -30,6 +30,9 @@ export class DemoProvider extends BaseProvider {
     }
 
     async chat({ messages = [], tools = [] }) {
+        const userMsg = [...messages].reverse().find(message => message.role === "user")?.content || "";
+        const lower = userMsg.toLowerCase();
+
         // 1. Check if the previous round executed tools
         const toolMsg = [...messages].reverse().find(m => m.role === "tool");
         if (toolMsg) {
@@ -740,6 +743,7 @@ function extractSubjectFromText(text) {
                         arguments: {
                             subject,
                             hoursSpent: isMissed ? 0 : hours,
+                            ...(isMissed ? { missedHours: hours, scheduledHours: hours } : {}),
                             status: isMissed ? "missed" : "completed",
                             notes: userMsg
                         }

@@ -16,10 +16,11 @@ An autonomous, general-purpose reasoning agent and adaptive learning productivit
    - **StudyPilot Adaptive Planning**: Creates balanced study schedules, records completed or missed sessions, calculates remaining workloads, and rebalances schedules dynamically.
    - **Multi-Turn Requirement Aggregation**: Preserves conversational context across multiple turns (e.g., subjects in Turn 1, duration in Turn 2, daily capacity in Turn 3).
 
-3. **11 Full-Featured MCP Tools**:
+3. **13 Full-Featured MCP Tools**:
    - `list_study_plans`: Discover all saved plans.
    - `create_study_plan`: Create priority-weighted exam or goal-based schedules.
    - `get_study_plan`: Retrieve verified plan metrics and recent session records.
+   - `delete_study_plan`: Delete one selected plan and its session history after explicit confirmation.
    - `record_study_session`: Log completed or missed study hours.
    - `adapt_study_plan`: Dynamically recalculate allocations after missed sessions.
    - `create_quiz`: Generate multi-choice practice quizzes with explanations.
@@ -28,6 +29,7 @@ An autonomous, general-purpose reasoning agent and adaptive learning productivit
    - `get_study_progress`: Aggregate global metrics across all active plans.
    - `get_user_preferences`: Retrieve user learning style and study preferences.
    - `update_user_preferences`: Save or modify explanation style, preferred language, and pace.
+   - `reset_learning_data`: Clear all locally stored plans, sessions, preferences, and quiz data after explicit confirmation. Study plans are currently global, so this reset affects all stored users.
 
 4. **Alexa+ & Remote Streamable HTTP MCP Integration**:
    - Dual transport support: runs over **STDIO** for local agent orchestration or **Streamable HTTP** (`/mcp` endpoint) with optional Bearer token authorization (`MCP_AUTH_TOKEN`).
@@ -63,7 +65,7 @@ adaptive-ai-agent/
 │       ├── mcpClient.js            # Stdio & Streamable HTTP client manager
 │       └── index.js                # Singleton client accessor
 ├── studypilot-server/              # StudyPilot MCP Server
-│   ├── server.js                   # MCP server registering 9 StudyPilot tools (Stdio & HTTP)
+│   ├── server.js                   # MCP server registering 13 StudyPilot tools (Stdio & HTTP)
 │   ├── planner.js                  # Study planning, capacity math, & schedule adaptation algorithms
 │   ├── quizManager.js              # Quiz generation, mastery evaluation, & weak topic detection
 │   ├── storage.js                  # Atomic file-locked persistent JSON storage
@@ -73,7 +75,7 @@ adaptive-ai-agent/
 │   │   ├── App.jsx                 # Markdown-enabled chat interface with activity traces
 │   │   └── App.css                 # Dark-mode theme, glassmorphism, & code block styling
 │   └── vite.config.js              # Proxies /api requests to port 3000
-└── test/                           # 11 Deterministic test suites (100% passing)
+└── test/                           # 14 deterministic test suites
 ```
 
 ---
@@ -85,6 +87,7 @@ adaptive-ai-agent/
 | **`list_study_plans`** | Enumerate saved study plans with subject summaries and progress. | None |
 | **`create_study_plan`** | Generate an initial priority-weighted study schedule. | `subjects`, `examDate` (optional), `durationDays` (optional), `dailyAvailableHours` (optional), `priorities` (optional), `planId` (optional) |
 | **`get_study_plan`** | Retrieve verified plan data, completed hours, remaining workload, and recent sessions. | `planId` (optional; resolved safely from context) |
+| **`delete_study_plan`** | Delete one selected plan and its recorded sessions; quiz history is preserved. | `planId`, `confirm: true` (required) |
 | **`record_study_session`** | Log completed or missed study hours. | `subject`, `hoursSpent`, `status` (`completed` \| `partially_completed` \| `missed`), `missedHours`, `scheduledHours`, `date`, `dayNumber`, `planId` |
 | **`adapt_study_plan`** | Dynamically adjust remaining workload after missed sessions. | `planId`, `reason`, `newExamDate` (optional), `newDailyAvailableHours` (optional) |
 | **`create_quiz`** | Generate an interactive practice quiz with questions, options, and explanations. | `subject`, `topic` (optional), `questionCount` (optional, 1-10), `difficulty` (optional) |
@@ -93,6 +96,7 @@ adaptive-ai-agent/
 | **`get_study_progress`** | Aggregate workload and quiz completion metrics across all active plans. | `planId` (optional; returns global stats if omitted) |
 | **`get_user_preferences`** | Retrieve stored learning and study preferences. | `userId` (optional) |
 | **`update_user_preferences`** | Save or update explanation style, preferred language, daily availability, and notes. | `preferredExplanationStyle` (optional), `preferredLanguage` (optional), `defaultDailyAvailableHours` (optional), `targetDifficulty` (optional), `customNotes` (optional), `userId` (optional) |
+| **`reset_learning_data`** | Clear all local plans, sessions, preferences, and quiz data after explicit confirmation. This is global because plans are not user-scoped. | `confirm: true` (required) |
 
 ---
 
@@ -139,7 +143,7 @@ npm run dev
 
 ## 🧪 Comprehensive Test Suite
 
-All 12 test suites run deterministically without network flakiness:
+The `npm test` command runs these 14 test files:
 
 ```bash
 npm test
@@ -147,17 +151,19 @@ npm test
 
 ### Test Suites Included:
 1. `test/groq_provider.test.js`: Rate-limit backoff, timeouts, key sanitization, parallel tool calls.
-2. `test/academic_tutoring.test.js`: General-purpose multi-subject Q&A, debugging assistance & multi-turn aggregation.
-3. `test/user_preferences.test.js`: User personalization, preference persistence, and user isolation.
-4. `test/expanded_mcp_tools.test.js`: Quiz creation, mastery scoring, weak topic detection, progress aggregation.
-5. `test/argument_normalization.test.js`: Comprehensive schema normalizer and intent verification.
-6. `test/studypilot_mcp.test.js`: Stdio MCP protocol contract and plan accounting.
-7. `test/failure_handling.test.js`: Symmetric partial success handling and tool timeouts.
-8. `test/phase3_regressions.test.js`: Regression suite covering plan IDs, date recovery, and capacity bounds.
-9. `test/study_plan_dates_recovery.test.js`: Inclusive date bounds, Day N mapping, and malformed JSON recovery.
-10. `test/api_contract.test.js`: Express HTTP API contracts (`/api/health`, `/api/tools`, `/api/chat`).
-11. `test/agent_evaluation.test.js`: End-to-end autonomous agent multi-step evaluation.
-12. `test/studypilot_http.test.js`: Streamable HTTP MCP server verification (`/mcp` endpoint) & Bearer token auth.
+2. `test/demo_provider.test.js`: Offline provider greetings and missed-session amount mapping.
+3. `test/academic_tutoring.test.js`: General-purpose multi-subject Q&A, debugging assistance & multi-turn aggregation.
+4. `test/user_preferences.test.js`: User personalization, preference persistence, and user isolation.
+5. `test/reset_learning_data.test.js`: Confirmed single-plan deletion and global reset using isolated temporary data.
+6. `test/expanded_mcp_tools.test.js`: Quiz creation, mastery scoring, weak topic detection, progress aggregation.
+7. `test/argument_normalization.test.js`: Comprehensive schema normalizer and intent verification.
+8. `test/studypilot_mcp.test.js`: Stdio MCP protocol contract and plan accounting.
+9. `test/failure_handling.test.js`: Symmetric partial success handling and tool timeouts.
+10. `test/phase3_regressions.test.js`: Regression suite covering plan IDs, date recovery, and capacity bounds.
+11. `test/study_plan_dates_recovery.test.js`: Inclusive date bounds, Day N mapping, and malformed JSON recovery.
+12. `test/api_contract.test.js`: Express HTTP API contracts (`/api/health`, `/api/tools`, `/api/chat`).
+13. `test/agent_evaluation.test.js`: End-to-end autonomous agent multi-step evaluation.
+14. `test/studypilot_http.test.js`: Streamable HTTP MCP server verification (`/mcp` endpoint) & Bearer token auth.
 
 
 ---

@@ -3,7 +3,7 @@ import { normalizeToolArguments, isRetrievalIntent, isAdaptationIntent, isSessio
 import { validateToolArguments, verifyToolResult } from "./validator.js";
 import { verifyFinalAnswerConsistency, stripMetaPreamble, formatGroundedPlanSummary, formatGroundedPlanList, formatGroundedAdaptationSummary, formatGroundedRetrievalSummary, formatGroundedSessionSummary } from "./consistencyChecker.js";
 
-const MUTATION_TOOLS = new Set(["record_study_session", "create_study_plan", "adapt_study_plan"]);
+const MUTATION_TOOLS = new Set(["record_study_session", "create_study_plan", "adapt_study_plan", "delete_study_plan"]);
 
 function isMalformedToolCallJsonError(error) {
     return error?.code === "MALFORMED_TOOL_CALL_JSON" ||
@@ -74,6 +74,9 @@ export class AdaptiveAgent {
         let resolvedActivePlanId = activePlanId;
 
         // 1. Fetch available tools dynamically from MCP client
+        if (typeof this.mcpClient.whenReady === "function" && this.mcpClient.isConfigured?.() && !this.mcpClient.connected) {
+            await this.mcpClient.whenReady(effectiveTimeoutMs || 5000);
+        }
         const tools = this.mcpClient.listTools();
 
         // 2. Prepare conversation history with system instructions

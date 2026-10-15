@@ -37,6 +37,7 @@ export class McpClientManager {
         this.tools = [];
         this.connected = false;
         this.lastError = null;
+        this.connectPromise = null;
     }
 
     /**
@@ -92,79 +93,111 @@ export class McpClientManager {
             };
         }
 
-        const resolvedArgs = this.resolveArgs();
-        let serverCwd = process.env.MCP_SERVER_CWD || process.cwd();
-        for (const arg of resolvedArgs) {
-            if (fs.existsSync(arg) && (arg.endsWith(".js") || arg.endsWith(".mjs") || arg.endsWith(".ts"))) {
-                serverCwd = path.dirname(arg);
-                break;
-            }
+        if (this.connectPromise) {
+            return this.connectPromise;
         }
 
-        try {
-            this.client = new Client({
-                name: this.clientName,
-                version: this.clientVersion
-            });
+        this.connectPromise = (async () => {
+            const resolvedArgs = this.resolveArgs();
+            let serverCwd = process.env.MCP_SERVER_CWD || process.cwd();
+            for (const arg of resolvedArgs) {
+                if (fs.existsSync(arg) && (arg.endsWith(".js") || arg.endsWith(".mjs") || arg.endsWith(".ts"))) {
+                    serverCwd = path.dirname(arg);
+                    break;
+                }
+            }
 
-            const appNodeModules = path.resolve(__dirname, "../../node_modules");
-            if (this.url) {
-                const authToken = this.authToken || process.env.MCP_AUTH_TOKEN;
-                const transportOpts = authToken
-                    ? { requestInit: { headers: { Authorization: `Bearer ${authToken}` } } }
-                    : {};
-                this.transport = new StreamableHTTPClientTransport(
-                    new URL(this.url),
-                    transportOpts
-                );
+            try {
+                this.client = new Client({
+                    name: this.clientName,
+                    version: this.clientVersion
+                });
+
+                const appNodeModules = path.resolve(__dirname, "../../node_modules");
+                if (this.url) {
+                    const authToken = this.authToken || process.env.MCP_AUTH_TOKEN;
+                    const transportOpts = authToken
+                        ? { requestInit: { headers: { Authorization: `Bearer ${authToken}` } } }
+                        : {};
+                    this.transport = new StreamableHTTPClientTransport(
+                        new URL(this.url),
+                        transportOpts
+                    );
+
+                    console.log(
+                        `[MCP] Connecting to Streamable HTTP server: ${this.url}`
+                    );
+                } else {
+                    console.log(`[MCP] Connecting to server: ${this.command} ${resolvedArgs.join(" ")} (cwd: ${serverCwd})`);
+                    this.transport = new StdioClientTransport({
+                        command: this.command,
+                        args: resolvedArgs,
+                        cwd: serverCwd,
+                        env: {
+                            ...process.env,
+                            NODE_PATH: appNodeModules,
+                            ...(this.env || {})
+                        }
+                    });
+                }
+
+                await this.client.connect(this.transport);
+                this.connected = true;
+                this.lastError = null;
+
+                // Discover and cache available tools
+                const listResult = await this.client.listTools();
+                this.tools = listResult.tools || [];
 
                 console.log(
-                    `[MCP] Connecting to Streamable HTTP server: ${this.url}`
+                    `[MCP] Connected successfully. Discovered ${this.tools.length} tool(s): ` +
+                    `[${this.tools.map(t => t.name).join(", ")}]`
                 );
-            } else {
-                console.log(`[MCP] Connecting to server: ${this.command} ${resolvedArgs.join(" ")} (cwd: ${serverCwd})`);
-                this.transport = new StdioClientTransport({
-                    command: this.command,
-                    args: resolvedArgs,
-                    cwd: serverCwd,
-                    env: {
-                        ...process.env,
-                        NODE_PATH: appNodeModules,
-                        ...(this.env || {})
-                    }
-                });
+
+                return {
+                    connected: true,
+                    tools: this.tools
+                };
+            } catch (error) {
+                this.connected = false;
+                this.client = null;
+                this.transport = null;
+                this.tools = [];
+                this.lastError = error.message;
+
+                console.error(`[MCP] Connection failed: ${error.message}`);
+                return {
+                    connected: false,
+                    error: error.message
+                };
+            } finally {
+                this.connectPromise = null;
             }
+        })();
 
-            await this.client.connect(this.transport);
-            this.connected = true;
-            this.lastError = null;
+        return this.connectPromise;
+    }
 
-            // Discover and cache available tools
-            const listResult = await this.client.listTools();
-            this.tools = listResult.tools || [];
-
-            console.log(
-                `[MCP] Connected successfully. Discovered ${this.tools.length} tool(s): ` +
-                `[${this.tools.map(t => t.name).join(", ")}]`
-            );
-
-            return {
-                connected: true,
-                tools: this.tools
-            };
-        } catch (error) {
-            this.connected = false;
-            this.client = null;
-            this.transport = null;
-            this.tools = [];
-            this.lastError = error.message;
-
-            console.error(`[MCP] Connection failed: ${error.message}`);
-            return {
-                connected: false,
-                error: error.message
-            };
+    /**
+     * Await readiness of the MCP client if connection is in progress
+     * @param {number} [timeoutMs=5000]
+     * @returns {Promise<boolean>}
+     */
+    async whenReady(timeoutMs = 5000) {
+        if (!this.isConfigured()) return false;
+        if (this.connected && this.tools.length > 0) return true;
+        if (this.connectPromise) {
+            try {
+                await Promise.race([
+                    this.connectPromise,
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout waiting for MCP connection")), timeoutMs))
+                ]);
+            } catch {
+                // fall through to return current status
+            }
+            return this.connected;
         }
+        return this.connected;
     }
 
     /**
@@ -231,6 +264,12 @@ export class McpClientManager {
      * @returns {Promise<{ isError: boolean, content: string, rawResult?: Object }>}
      */
     async callTool(name, rawArgs = {}, options = {}) {
+        if (!this.connected || !this.client) {
+            if (this.isConfigured() && this.connectPromise) {
+                await this.whenReady(options.timeout || 5000);
+            }
+        }
+
         if (!this.connected || !this.client) {
             return {
                 isError: true,

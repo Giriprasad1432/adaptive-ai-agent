@@ -115,6 +115,8 @@ export function TopBar({
                 ? provider
                 : apiStatus === 'checking'
                 ? 'Connecting'
+                : apiStatus === 'partial'
+                ? 'Connecting Tools'
                 : 'Offline'}
             </span>
             <span className="tool-count-badge">{toolCount} Tools</span>

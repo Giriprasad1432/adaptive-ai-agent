@@ -77,7 +77,7 @@ export function PreferencesView() {
       const res = await fetch(`${API_BASE_URL}/api/reset`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: 'default' }),
+        body: JSON.stringify({ confirm: true }),
       })
       const result = await res.json()
       if (!res.ok || result.error) {

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node test/groq_provider.test.js && node test/academic_tutoring.test.js && node test/user_preferences.test.js && node test/expanded_mcp_tools.test.js && node test/argument_normalization.test.js && node test/studypilot_mcp.test.js && node test/failure_handling.test.js && node test/phase3_regressions.test.js && node test/study_plan_dates_recovery.test.js && node test/api_contract.test.js && node test/agent_evaluation.test.js && node test/studypilot_http.test.js"
+    "test": "node test/groq_provider.test.js && node test/demo_provider.test.js && node test/academic_tutoring.test.js && node test/user_preferences.test.js && node test/reset_learning_data.test.js && node test/expanded_mcp_tools.test.js && node test/argument_normalization.test.js && node test/studypilot_mcp.test.js && node test/failure_handling.test.js && node test/phase3_regressions.test.js && node test/study_plan_dates_recovery.test.js && node test/api_contract.test.js && node test/agent_evaluation.test.js && node test/studypilot_http.test.js"
   },
   "repository": {
     "type": "git",
