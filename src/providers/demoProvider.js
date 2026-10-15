@@ -1,6 +1,6 @@
 import { BaseProvider } from "./baseProvider.js";
 import { formatGroundedRetrievalSummary } from "../agent/consistencyChecker.js";
-import { isEducationalTutoringIntent } from "../agent/normalizer.js";
+import { isEducationalTutoringIntent, isSessionRecordingIntent, extractExplicitPlanDayNumber } from "../agent/normalizer.js";
 
 /**
  * Built-in Rule-Based / Demo AI Provider for StudyPilot.
@@ -32,6 +32,7 @@ export class DemoProvider extends BaseProvider {
     async chat({ messages = [], tools = [] }) {
         const userMsg = [...messages].reverse().find(message => message.role === "user")?.content || "";
         const lower = userMsg.toLowerCase();
+        const previousAssistantReply = [...messages].reverse().find(message => message.role === "assistant")?.content || "";
 
         // 1. Check if the previous round executed tools
         const toolMsg = [...messages].reverse().find(m => m.role === "tool");
@@ -597,6 +598,15 @@ function extractSubjectFromText(text) {
             };
         }
 
+        if (/^(?:ok(?:ay)?|nice|thanks|thank you|cool)(?:[\s!.]+(?:nice|thanks|thank you|cool))?[\s!.]*$/i.test(lower) &&
+            /(?:practice quiz|question\s+1:)/i.test(previousAssistantReply)) {
+            return {
+                role: "assistant",
+                content: "Glad it helps! When you're ready, send your answers in a format like ‘1: A, 2: B, 3: C’, and I’ll check them.",
+                toolCalls: []
+            };
+        }
+
         // 2.6 Quiz Intent
         if (/\b(?:create|generate|start|take|give me|make)\b.{0,20}\b(?:quiz|test|assessment|questions)\b/i.test(lower) ||
             /\bquiz (?:me|on)\b/i.test(lower)) {
@@ -661,14 +671,14 @@ function extractSubjectFromText(text) {
             
             // Extract subjects
             let subjects = [];
-            const subMatch = lower.match(/(?:for|in|covering|subjects?)\s+([a-zA-Z0-9,\s&]+?)(?:\s+(?:with|having|exam|for|daily)|$)/i);
-            if (subMatch && subMatch[1]) {
-                subjects = subMatch[1].split(/,| and /i).map(s => s.trim()).filter(s => s.length > 1 && !/^(the|a|an|my|our)$/i.test(s));
+            const candidates = ["mathematics", "physics", "chemistry", "biology", "history", "javascript", "react", "dbms", "english", "computer science"];
+            for (const c of candidates) {
+                if (lower.includes(c)) subjects.push(c === "dbms" ? "DBMS" : (c.charAt(0).toUpperCase() + c.slice(1)));
             }
             if (subjects.length === 0) {
-                const candidates = ["mathematics", "physics", "chemistry", "biology", "history", "javascript", "react", "dbms", "english", "computer science"];
-                for (const c of candidates) {
-                    if (lower.includes(c)) subjects.push(c.charAt(0).toUpperCase() + c.slice(1));
+                const subMatch = lower.match(/(?:for|in|covering|subjects?)\s+([a-zA-Z0-9,\s&]+?)(?:\s+(?:with|having|exam|for|daily)|$)/i);
+                if (subMatch && subMatch[1]) {
+                    subjects = subMatch[1].split(/,| and /i).map(s => s.trim()).filter(s => s.length > 1 && !/^(the|a|an|my|our|a\s+week|\d+\s*(?:days?|weeks?)|week|days?)$/i.test(s));
                 }
             }
             if (subjects.length === 0) {
@@ -686,13 +696,16 @@ function extractSubjectFromText(text) {
 
             // Extract daily hours
             const hoursMatch = userMsg.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h\b)/i);
-            const dailyAvailableHours = hoursMatch ? parseFloat(hoursMatch[1]) : 3;
+            const dailyAvailableHours = hoursMatch ? parseFloat(hoursMatch[1]) : 2;
 
             // Extract duration days if no exam date
             let durationDays;
             const daysMatch = userMsg.match(/(\d+)\s*(?:days?)\b/i);
+            const weekMatch = userMsg.match(/\b(?:a|1)\s*week\b/i);
             if (daysMatch && !examDate) {
                 durationDays = parseInt(daysMatch[1], 10);
+            } else if (weekMatch && !examDate) {
+                durationDays = 7;
             }
 
             const args = {
@@ -716,12 +729,14 @@ function extractSubjectFromText(text) {
         }
 
         // 2.3 Record study session intent
-        if (/\b(?:record|log|studied|missed|completed|did)\b.{0,40}\b(?:session|hour|hours|hrs|work)\b/i.test(lower) ||
+        if (isSessionRecordingIntent(userMsg) ||
+            /\b(?:record|log|studied|missed|completed|did)\b.{0,40}\b(?:session|hour|hours|hrs|work)\b/i.test(lower) ||
             /\b(?:i studied|i missed)\b/i.test(lower)) {
             
             const isMissed = /\bmissed\b/i.test(lower);
-            const hoursMatch = userMsg.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h\b)/i);
+            const hoursMatch = userMsg.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
             const hours = hoursMatch ? parseFloat(hoursMatch[1]) : 2;
+            const dayNumber = extractExplicitPlanDayNumber(userMsg);
 
             // Find subject
             let subject = "Mathematics";
@@ -730,6 +745,18 @@ function extractSubjectFromText(text) {
                 if (lower.includes(c)) {
                     subject = c.charAt(0).toUpperCase() + c.slice(1);
                     break;
+                }
+            }
+            if (subject === "Mathematics" && !lower.includes("mathematics") && !lower.includes("math")) {
+                for (let i = messages.length - 1; i >= 0; i--) {
+                    const content = String(messages[i]?.content || "").toLowerCase();
+                    for (const c of common) {
+                        if (content.includes(c)) {
+                            subject = c.charAt(0).toUpperCase() + c.slice(1);
+                            break;
+                        }
+                    }
+                    if (subject !== "Mathematics") break;
                 }
             }
 
@@ -745,6 +772,7 @@ function extractSubjectFromText(text) {
                             hoursSpent: isMissed ? 0 : hours,
                             ...(isMissed ? { missedHours: hours, scheduledHours: hours } : {}),
                             status: isMissed ? "missed" : "completed",
+                            ...(dayNumber ? { dayNumber } : {}),
                             notes: userMsg
                         }
                     }

@@ -50,7 +50,7 @@ export class GroqProvider extends BaseProvider {
             "llama-3.3-70b-versatile";
 
         this.timeoutMs = Number(
-            config.timeoutMs || process.env.GROQ_TIMEOUT_MS || 20000
+            config.timeoutMs || process.env.GROQ_TIMEOUT_MS || 35000
         );
         this.maxRetries = Number(
             config.maxRetries !== undefined
@@ -206,7 +206,20 @@ export class GroqProvider extends BaseProvider {
             };
 
             if (msg.tool_calls) {
-                normalized.tool_calls = msg.tool_calls;
+                normalized.tool_calls = msg.tool_calls.map((call, index) => {
+                    const fn = call.function || {};
+                    const rawArguments = fn.arguments ?? call.arguments ?? {};
+                    return {
+                        id: call.id || `history_tool_call_${index}`,
+                        type: "function",
+                        function: {
+                            name: fn.name || call.name,
+                            arguments: typeof rawArguments === "string"
+                                ? rawArguments
+                                : JSON.stringify(rawArguments)
+                        }
+                    };
+                });
             }
 
             // Groq expects tool responses to reference the original call ID.

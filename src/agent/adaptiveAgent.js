@@ -531,8 +531,14 @@ export class AdaptiveAgent {
                     if (!rawArgs.planId && resolvedActivePlanId) {
                         rawArgs.planId = resolvedActivePlanId;
                     }
-                    if (!rawArgs.subject) {
-                        const planSubjects = resolvedPlanSummary?.subjects || [];
+                    const planSubjects = resolvedPlanSummary?.subjects || [];
+                    const matchedPlanSubject = rawArgs.subject && planSubjects.find(s => s.toLowerCase() === String(rawArgs.subject).toLowerCase());
+                    const isRawSubjectInPlan = Boolean(matchedPlanSubject);
+                    const userMentionsRawSubject = rawArgs.subject && new RegExp(`\\b${String(rawArgs.subject).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(message);
+
+                    if (matchedPlanSubject) {
+                        rawArgs.subject = matchedPlanSubject;
+                    } else if (!rawArgs.subject || (!isRawSubjectInPlan && !userMentionsRawSubject)) {
                         if (planSubjects.length === 1) {
                             rawArgs.subject = planSubjects[0];
                         } else if (recentSessionContext?.subject) {
