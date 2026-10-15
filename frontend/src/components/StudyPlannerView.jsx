@@ -2,6 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
+function isTestPlanId(id) {
+  if (!id) return true
+  return /^(?:test[_-]|repro[_-]|agent_e2e|adaptive_regress|adapt_preserve|eval[_-]|date-e2e-|success_|mock[_-])/i.test(id)
+}
+
 export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanId }) {
   const [plans, setPlans] = useState([])
   const [activePlanId, setActivePlanId] = useState(initialActivePlanId || '')
@@ -15,7 +20,8 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showSessionModal, setShowSessionModal] = useState(false)
   const [showAdaptModal, setShowAdaptModal] = useState(false)
-  const [showAdvancedCreate, setShowAdvancedCreate] = useState(false)
+  const [planToDelete, setPlanToDelete] = useState(null)
+  const [deletingPlan, setDeletingPlan] = useState(false)
   const [activeDetailTab, setActiveDetailTab] = useState('sessions') // 'sessions' | 'history'
 
   // Create Form State
@@ -47,7 +53,8 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
         throw new Error(`Failed to load plans (${res.status})`)
       }
       const data = await res.json()
-      const list = data.plans || []
+      const rawList = data.plans || []
+      const list = rawList.filter((p) => !isTestPlanId(p.planId))
       setPlans(list)
 
       if (list.length > 0) {
@@ -95,7 +102,8 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
         const res = await fetch(`${API_BASE_URL}/api/plans`)
         if (!res.ok) throw new Error(`Failed to load plans (${res.status})`)
         const data = await res.json()
-        const list = data.plans || []
+        const rawList = data.plans || []
+        const list = rawList.filter((p) => !isTestPlanId(p.planId))
         if (!ignore) {
           setPlans(list)
           if (list.length > 0) {
@@ -285,6 +293,45 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
     }
   }
 
+  // Delete Plan Handler (Compliant with existing backend APIs and error reporting)
+  const handleDeletePlan = async () => {
+    if (!planToDelete) return
+    setDeletingPlan(true)
+    setError('')
+    setSuccessMsg('')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/plans/${encodeURIComponent(planToDelete.planId)}`, {
+        method: 'DELETE',
+      })
+
+      if (!res.ok) {
+        if (res.status === 404 || res.status === 405 || res.status === 501) {
+          throw new Error(
+            'Individual study-plan deletion is currently unavailable. To reset your learning plans, visit Settings > Danger Zone.'
+          )
+        }
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to delete plan. Please try again.')
+      }
+
+      // If backend confirms deletion
+      const remaining = plans.filter((p) => p.planId !== planToDelete.planId)
+      setPlans(remaining)
+      if (activePlanId === planToDelete.planId) {
+        setActivePlanId(remaining.length > 0 ? remaining[0].planId : '')
+      }
+      setSuccessMsg(`Study plan "${planToDelete.planId}" deleted successfully.`)
+      setPlanToDelete(null)
+      fetchPlans()
+    } catch (err) {
+      // On failure, keep the plan visible and display clear honest error
+      setError(err.message || 'Unable to delete study plan.')
+      setPlanToDelete(null)
+    } finally {
+      setDeletingPlan(false)
+    }
+  }
+
   const subjectsList = currentPlan?.subjects ? Object.entries(currentPlan.subjects) : []
 
   return (
@@ -345,9 +392,8 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
               const isActive = p.planId === activePlanId
               const subNames = Array.isArray(p.subjects) ? p.subjects.join(', ') : 'Study Plan'
               return (
-                <button
+                <div
                   key={p.planId}
-                  type="button"
                   role="tab"
                   aria-selected={isActive}
                   className={`plan-tab-chip ${isActive ? 'active' : ''}`}
@@ -355,7 +401,19 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
                 >
                   <span className="chip-subject">{subNames}</span>
                   <span className="chip-progress">{p.overallProgress}</span>
-                </button>
+                  <button
+                    type="button"
+                    className="chip-delete-btn"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setPlanToDelete(p)
+                    }}
+                    title={`Delete plan "${p.planId}"`}
+                    aria-label={`Delete plan "${p.planId}"`}
+                  >
+                    ✕
+                  </button>
+                </div>
               )
             })}
           </div>
@@ -365,10 +423,11 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
       {/* Empty State */}
       {!loading && plans.length === 0 && (
         <div className="empty-planner-state">
-          <div className="empty-state-badge">📅</div>
-          <h3>No Study Plans Created Yet</h3>
+          <div className="empty-state-badge">📋</div>
+          <h3>“No study plan yet. Let's create one together.”</h3>
           <p>
-            You don't have any study plans yet. Start a conversation with your AI tutor to discover your goals, starting level, and preferred schedule before generating a plan.
+            Your tasks will appear after your study plan is created.
+            Start a conversation with your AI tutor to discover your goals, starting level, and preferred schedule.
           </p>
           <div className="empty-cta-group">
             <button
@@ -376,7 +435,7 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
               className="btn-primary"
               onClick={() => onAskInChat?.("Hi! Let's create a personalized study plan.")}
             >
-              <span>✦ Start with AI Tutor</span>
+              <span>✦ Start Learning</span>
             </button>
             <button
               type="button"
@@ -434,6 +493,15 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
                 title="Practice quiz in AI Tutor"
               >
                 <span>✦ Practice Quiz</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary btn-sm btn-delete-plan-action"
+                onClick={() => setPlanToDelete(currentPlan)}
+                title={`Delete study plan "${currentPlan.planId}"`}
+                aria-label={`Delete study plan "${currentPlan.planId}"`}
+              >
+                <span>🗑 Delete Plan</span>
               </button>
             </div>
           </div>
@@ -864,7 +932,7 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
                   className="btn-primary"
                   disabled={actionLoading}
                 >
-                  {actionLoading ? 'Recording via MCP...' : 'Save Session'}
+                  {actionLoading ? 'Saving...' : 'Save Session'}
                 </button>
               </div>
             </form>
@@ -933,6 +1001,42 @@ export function StudyPlannerView({ onAskInChat, activePlanId: initialActivePlanI
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Plan Confirmation Dialog */}
+      {planToDelete && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="delete-plan-dialog-title">
+          <div className="confirm-modal-card">
+            <div className="modal-header-row">
+              <span className="modal-danger-icon" aria-hidden="true">🗑</span>
+              <h3 id="delete-plan-dialog-title">Delete Study Plan</h3>
+            </div>
+            <p className="modal-confirm-text">
+              Are you sure you want to delete study plan <strong>"{planToDelete.planId}"</strong>?
+            </p>
+            <p className="modal-confirm-subtext">
+              Subjects: {Array.isArray(planToDelete.subjects) ? planToDelete.subjects.join(', ') : Object.keys(planToDelete.subjects || {}).join(', ') || 'General Study'}
+            </p>
+            <div className="modal-actions-cluster">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setPlanToDelete(null)}
+                disabled={deletingPlan}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger-confirm"
+                onClick={handleDeletePlan}
+                disabled={deletingPlan}
+              >
+                {deletingPlan ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

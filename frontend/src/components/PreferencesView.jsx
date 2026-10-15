@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
-export function PreferencesView() {
+export function PreferencesView({
+  theme = 'dark',
+  onSelectTheme,
+  onClearAllHistory,
+}) {
   const [prefs, setPrefs] = useState({
     preferredExplanationStyle: 'detailed',
     preferredLanguage: 'JavaScript',
@@ -14,6 +18,10 @@ export function PreferencesView() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+
+  const [showResetModal, setShowResetModal] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [showClearHistoryModal, setShowClearHistoryModal] = useState(false)
 
   useEffect(() => {
     let ignore = false
@@ -66,9 +74,6 @@ export function PreferencesView() {
     }
   }
 
-  const [showResetModal, setShowResetModal] = useState(false)
-  const [resetting, setResetting] = useState(false)
-
   const handleResetData = async () => {
     setResetting(true)
     setError('')
@@ -108,20 +113,26 @@ export function PreferencesView() {
     }
   }
 
+  const handleConfirmClearHistory = () => {
+    onClearAllHistory?.()
+    setShowClearHistoryModal(false)
+    setSuccess('All local chat conversations have been permanently cleared from your browser.')
+  }
+
   return (
     <div className="preferences-container">
       <div className="preferences-top-bar">
         <div>
-          <h2>Settings &amp; Personalization</h2>
+          <h2>Settings &amp; Preferences</h2>
           <p className="preferences-subtitle">
-            Configure your AI tutor persona, learning goals, daily study capacity, and schedule.
+            Configure appearance theme, chat history, AI tutor persona, and learning goals.
           </p>
         </div>
       </div>
 
       {error && (
         <div className="banner banner-error" role="alert">
-          <span className="banner-icon">⚠</span>
+          <span className="banner-icon" aria-hidden="true">⚠</span>
           <span className="banner-text">{error}</span>
           <button type="button" className="banner-dismiss" onClick={() => setError('')}>✕</button>
         </div>
@@ -129,14 +140,124 @@ export function PreferencesView() {
 
       {success && (
         <div className="banner banner-success" role="status">
-          <span className="banner-icon">✓</span>
+          <span className="banner-icon" aria-hidden="true">✓</span>
           <span className="banner-text">{success}</span>
           <button type="button" className="banner-dismiss" onClick={() => setSuccess('')}>✕</button>
         </div>
       )}
 
+      {/* SECTION 1: APPEARANCE & THEME SELECTOR */}
+      <div className="settings-card">
+        <div className="settings-card-header">
+          <span className="settings-card-icon" aria-hidden="true">🎨</span>
+          <div>
+            <h3>Appearance &amp; Color Theme</h3>
+            <p className="settings-card-sub">
+              Select your interface color scheme. StudyPilot will adapt all panels, graphs, and inputs.
+            </p>
+          </div>
+        </div>
+
+        <div className="theme-options-grid" role="radiogroup" aria-label="Appearance Theme">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={theme === 'dark'}
+            className={`theme-option-card ${theme === 'dark' ? 'active' : ''}`}
+            onClick={() => onSelectTheme?.('dark')}
+          >
+            <div className="theme-preview dark-preview">
+              <div className="preview-nav" />
+              <div className="preview-content">
+                <div className="preview-line line-1" />
+                <div className="preview-line line-2" />
+              </div>
+            </div>
+            <div className="theme-option-info">
+              <div className="theme-title-row">
+                <span className="theme-name">Dark</span>
+                {theme === 'dark' && <span className="theme-active-dot">✓</span>}
+              </div>
+              <p className="theme-desc">Deep charcoal palette with violet accent. Ideal for low-light focus.</p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            role="radio"
+            aria-checked={theme === 'light'}
+            className={`theme-option-card ${theme === 'light' ? 'active' : ''}`}
+            onClick={() => onSelectTheme?.('light')}
+          >
+            <div className="theme-preview light-preview">
+              <div className="preview-nav" />
+              <div className="preview-content">
+                <div className="preview-line line-1" />
+                <div className="preview-line line-2" />
+              </div>
+            </div>
+            <div className="theme-option-info">
+              <div className="theme-title-row">
+                <span className="theme-name">Light</span>
+                {theme === 'light' && <span className="theme-active-dot">✓</span>}
+              </div>
+              <p className="theme-desc">Soft neutral background with crisp white surfaces and restrained accent.</p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            role="radio"
+            aria-checked={theme === 'system'}
+            className={`theme-option-card ${theme === 'system' ? 'active' : ''}`}
+            onClick={() => onSelectTheme?.('system')}
+          >
+            <div className="theme-preview system-preview">
+              <div className="preview-split-dark" />
+              <div className="preview-split-light" />
+            </div>
+            <div className="theme-option-info">
+              <div className="theme-title-row">
+                <span className="theme-name">System</span>
+                {theme === 'system' && <span className="theme-active-dot">✓</span>}
+              </div>
+              <p className="theme-desc">Automatically match your operating system appearance preference.</p>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      {/* SECTION 2: CHAT HISTORY MANAGEMENT */}
+      <div className="settings-card">
+        <div className="settings-card-header">
+          <span className="settings-card-icon" aria-hidden="true">💬</span>
+          <div>
+            <h3>Chat History Management</h3>
+            <p className="settings-card-sub">
+              Chat transcripts are stored locally in your browser storage. You can delete individual chats from the sidebar or clear all history below.
+            </p>
+          </div>
+        </div>
+
+        <div className="history-management-row">
+          <div>
+            <strong>Clear All Chat History</strong>
+            <p className="text-muted">
+              Permanently deletes all saved chat conversations from this device without affecting your study plans.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => setShowClearHistoryModal(true)}
+          >
+            Clear All Chats
+          </button>
+        </div>
+      </div>
+
+      {/* SECTION 3: LEARNING GOALS & TUTOR PREFERENCES */}
       <form onSubmit={handleSave} className="preferences-form-card">
-        {/* Group 1: Onboarding Profile & Goals */}
         <div className="pref-group-section">
           <h3 className="pref-group-title">🎯 Learning Goals &amp; Background</h3>
 
@@ -148,118 +269,41 @@ export function PreferencesView() {
               className="form-input"
               value={prefs.goal || ''}
               onChange={(e) => setPrefs({ ...prefs, goal: e.target.value })}
-              placeholder="e.g. Master Java backend development, Crack DBMS for technical interviews"
-              disabled={loading || saving}
+              placeholder="e.g. Master Full-Stack Web Development, Pass CS301 Exam"
             />
           </div>
 
-          <div className="form-row">
-            <div className="form-group flex-1">
-              <label htmlFor="pref-subjects">Focus Subjects / Topics</label>
-              <input
-                id="pref-subjects"
-                type="text"
-                className="form-input"
-                value={Array.isArray(prefs.subjects) ? prefs.subjects.join(', ') : (prefs.subjects || '')}
-                onChange={(e) =>
-                  setPrefs({
-                    ...prefs,
-                    subjects: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
-                  })
-                }
-                placeholder="e.g. Java, Spring Boot, SQL"
-                disabled={loading || saving}
-              />
-            </div>
-
-            <div className="form-group flex-1">
-              <label>Current Experience Level</label>
-              <div className="radio-pill-group">
-                {['beginner', 'intermediate', 'advanced'].map((lvl) => (
-                  <button
-                    key={lvl}
-                    type="button"
-                    className={`radio-pill ${(prefs.currentLevel || prefs.targetDifficulty) === lvl ? 'active' : ''}`}
-                    onClick={() => setPrefs({ ...prefs, currentLevel: lvl, targetDifficulty: lvl })}
-                    disabled={loading || saving}
-                  >
-                    {lvl.charAt(0).toUpperCase() + lvl.slice(1)}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
           <div className="form-group">
-            <label htmlFor="pref-starting">Starting Knowledge &amp; Difficult Topics</label>
-            <textarea
-              id="pref-starting"
-              className="form-textarea"
-              rows={2}
+            <label htmlFor="pref-starting-point">Current Knowledge / What You Already Know</label>
+            <input
+              id="pref-starting-point"
+              type="text"
+              className="form-input"
               value={prefs.startingPoint || ''}
               onChange={(e) => setPrefs({ ...prefs, startingPoint: e.target.value })}
-              placeholder="e.g. Comfortable with variables and loops; struggle with OOP polymorphism and recursion."
-              disabled={loading || saving}
+              placeholder="e.g. Basic variables and loops; struggled with pointers and recursion"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="pref-target-deadline">Target Deadline or Exam Date</label>
+            <input
+              id="pref-target-deadline"
+              type="text"
+              className="form-input"
+              value={prefs.targetDeadline || ''}
+              onChange={(e) => setPrefs({ ...prefs, targetDeadline: e.target.value })}
+              placeholder="e.g. In 4 weeks, or 2026-12-15"
             />
           </div>
         </div>
 
-        {/* Group 2: Tutor & Explanation Style */}
         <div className="pref-group-section">
-          <h3 className="pref-group-title">💡 Tutor &amp; Content Delivery</h3>
-
-          <div className="form-group">
-            <label htmlFor="pref-style">Preferred Explanation Style</label>
-            <select
-              id="pref-style"
-              className="form-select"
-              value={prefs.preferredExplanationStyle || 'detailed'}
-              onChange={(e) => setPrefs({ ...prefs, preferredExplanationStyle: e.target.value, learningPreference: e.target.value })}
-              disabled={loading || saving}
-            >
-              <option value="detailed">Detailed — Step-by-step conceptual walkthroughs</option>
-              <option value="short">Short — Concise bullet points &amp; key rules</option>
-              <option value="code_first">Code-First — Code implementations and syntax</option>
-              <option value="intuitive">Intuitive — Everyday analogies and mental models</option>
-            </select>
-          </div>
+          <h3 className="pref-group-title">⏱ Study Pace &amp; Schedule</h3>
 
           <div className="form-row">
             <div className="form-group flex-1">
-              <label htmlFor="pref-lang">Primary Language</label>
-              <input
-                id="pref-lang"
-                type="text"
-                className="form-input"
-                value={prefs.preferredLanguage || ''}
-                onChange={(e) => setPrefs({ ...prefs, preferredLanguage: e.target.value })}
-                placeholder="e.g. Java, Python, C++, JavaScript"
-                disabled={loading || saving}
-              />
-            </div>
-
-            <div className="form-group flex-1">
-              <label htmlFor="pref-schedule">Study Schedule</label>
-              <input
-                id="pref-schedule"
-                type="text"
-                className="form-input"
-                value={prefs.studySchedule || ''}
-                onChange={(e) => setPrefs({ ...prefs, studySchedule: e.target.value })}
-                placeholder="e.g. Weekdays in evening, Daily, Weekends only"
-                disabled={loading || saving}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Group 3: Study Capacity & Deadlines */}
-        <div className="pref-group-section">
-          <h3 className="pref-group-title">⏱ Study Capacity &amp; Timeline</h3>
-
-          <div className="form-row">
-            <div className="form-group flex-1">
-              <label htmlFor="pref-hours">Daily Available Hours</label>
+              <label htmlFor="pref-hours">Default Daily Study Capacity</label>
               <input
                 id="pref-hours"
                 type="number"
@@ -267,58 +311,93 @@ export function PreferencesView() {
                 min="0.5"
                 max="12"
                 className="form-input"
-                value={prefs.defaultDailyAvailableHours || 2}
-                onChange={(e) => setPrefs({ ...prefs, defaultDailyAvailableHours: Number(e.target.value) })}
-                disabled={loading || saving}
+                value={prefs.defaultDailyAvailableHours ?? 2}
+                onChange={(e) =>
+                  setPrefs({ ...prefs, defaultDailyAvailableHours: parseFloat(e.target.value) || 2 })
+                }
               />
+              <span className="input-hint">Used as default baseline for new study schedules.</span>
             </div>
 
             <div className="form-group flex-1">
-              <label htmlFor="pref-deadline">Target Deadline / Exam Date</label>
+              <label htmlFor="pref-schedule">Preferred Study Days or Hours</label>
               <input
-                id="pref-deadline"
+                id="pref-schedule"
                 type="text"
                 className="form-input"
-                value={prefs.targetDeadline || ''}
-                onChange={(e) => setPrefs({ ...prefs, targetDeadline: e.target.value })}
-                placeholder="e.g. 2026-12-15 or 30 days"
-                disabled={loading || saving}
+                value={prefs.studySchedule || ''}
+                onChange={(e) => setPrefs({ ...prefs, studySchedule: e.target.value })}
+                placeholder="e.g. Weekday evenings from 7-9 PM"
               />
+            </div>
+          </div>
+        </div>
+
+        <div className="pref-group-section">
+          <h3 className="pref-group-title">🧠 AI Tutor Pedagogy &amp; Explanations</h3>
+
+          <div className="form-row">
+            <div className="form-group flex-1">
+              <label htmlFor="pref-level">Target Difficulty Level</label>
+              <select
+                id="pref-level"
+                className="form-select"
+                value={prefs.targetDifficulty || 'intermediate'}
+                onChange={(e) => setPrefs({ ...prefs, targetDifficulty: e.target.value })}
+              >
+                <option value="beginner">Beginner (Foundations &amp; Syntax)</option>
+                <option value="intermediate">Intermediate (Standard Curriculum)</option>
+                <option value="advanced">Advanced (Deep Dive &amp; Optimizations)</option>
+              </select>
+            </div>
+
+            <div className="form-group flex-1">
+              <label htmlFor="pref-style">Explanation Style</label>
+              <select
+                id="pref-style"
+                className="form-select"
+                value={prefs.preferredExplanationStyle || 'detailed'}
+                onChange={(e) => setPrefs({ ...prefs, preferredExplanationStyle: e.target.value })}
+              >
+                <option value="concise">Concise &amp; Direct</option>
+                <option value="detailed">Detailed with Analogies</option>
+                <option value="socratic">Socratic (Guided Questions)</option>
+              </select>
             </div>
           </div>
 
           <div className="form-group">
-            <label htmlFor="pref-notes">Custom Notes for Tutor</label>
+            <label htmlFor="pref-notes">Custom Learning Instructions for Tutor</label>
             <textarea
               id="pref-notes"
               className="form-textarea"
-              rows={2}
+              rows={3}
               value={prefs.customNotes || ''}
               onChange={(e) => setPrefs({ ...prefs, customNotes: e.target.value })}
-              placeholder="e.g. Prioritize practical examples; remind me to review weak topics periodically."
-              disabled={loading || saving}
+              placeholder="e.g. Always provide short runnable code snippets; quiz me after every topic."
             />
           </div>
         </div>
 
-        <div className="form-footer-actions">
+        <div className="pref-actions-bar">
           <button
             type="submit"
             className="btn-primary"
-            disabled={loading || saving}
+            disabled={saving || loading}
           >
-            {saving ? 'Saving...' : 'Save Settings'}
+            {saving ? 'Saving...' : 'Save Preferences'}
           </button>
         </div>
       </form>
 
-      {/* Danger Zone: Explicit Data Reset */}
+      {/* SECTION 4: DANGER ZONE (LEARNING DATA RESET) */}
       <div className="danger-zone-card">
         <div className="danger-zone-header">
-          <div>
-            <h4 className="danger-zone-title">Reset Learning Data</h4>
+          <span className="danger-icon" aria-hidden="true">⚠</span>
+          <div className="danger-zone-text">
+            <h4>Danger Zone: Reset All Learning Records</h4>
             <p className="danger-zone-sub">
-              Permanently clear saved study plans, session logs, and personalized preferences to start completely fresh.
+              Cleanly resets all saved study plans, session history, quiz scores, and personalized preferences to start fresh.
             </p>
           </div>
           <button
@@ -327,41 +406,63 @@ export function PreferencesView() {
             onClick={() => setShowResetModal(true)}
             disabled={loading || resetting}
           >
-            Reset All Data
+            Reset All Records
           </button>
         </div>
       </div>
 
-      {/* Confirmation Modal */}
-      {showResetModal && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="reset-modal-title">
-          <div className="modal-card">
-            <div className="modal-header">
-              <h3 id="reset-modal-title" className="text-error">⚠ Reset All Learning Data?</h3>
+      {/* Clear Chat History Confirmation Modal */}
+      {showClearHistoryModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="clear-history-title">
+          <div className="confirm-modal-card">
+            <div className="modal-header-row">
+              <span className="modal-danger-icon" aria-hidden="true">🗑</span>
+              <h3 id="clear-history-title">Clear All Chat History?</h3>
+            </div>
+            <p className="modal-confirm-text">
+              Are you sure you want to permanently delete all saved chat conversations from your browser?
+            </p>
+            <p className="modal-confirm-subtext">
+              This only removes conversation history stored on this device. Your study plans and progress records will remain intact.
+            </p>
+            <div className="modal-actions-cluster">
               <button
                 type="button"
-                className="modal-close-btn"
-                onClick={() => setShowResetModal(false)}
-                disabled={resetting}
+                className="btn-secondary"
+                onClick={() => setShowClearHistoryModal(false)}
               >
-                ✕
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger-confirm"
+                onClick={handleConfirmClearHistory}
+              >
+                Delete All History
               </button>
             </div>
-            <div className="modal-body">
-              <p>
-                Are you sure you want to reset your StudyPilot experience? This will cleanly delete:
-              </p>
-              <ul className="reset-warning-list">
-                <li>All active and past study plans</li>
-                <li>All recorded study sessions and progress statistics</li>
-                <li>Quiz scores and weak topic history</li>
-                <li>Your customized profile preferences</li>
-              </ul>
-              <p className="text-muted">
-                Your AI tutor will welcome you as a new user so you can start an onboarding conversation from scratch.
-              </p>
+          </div>
+        </div>
+      )}
+
+      {/* Learning Data Reset Confirmation Modal */}
+      {showResetModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="reset-modal-title">
+          <div className="confirm-modal-card">
+            <div className="modal-header-row">
+              <span className="modal-danger-icon" aria-hidden="true">⚠</span>
+              <h3 id="reset-modal-title">Reset All Learning Records?</h3>
             </div>
-            <div className="modal-footer">
+            <p className="modal-confirm-text">
+              Are you sure you want to reset your StudyPilot learning records? This will cleanly remove:
+            </p>
+            <ul className="reset-warning-list">
+              <li>All active and past study plans</li>
+              <li>All recorded study sessions and progress statistics</li>
+              <li>Quiz scores and weak topic history</li>
+              <li>Your customized learning profile preferences</li>
+            </ul>
+            <div className="modal-actions-cluster">
               <button
                 type="button"
                 className="btn-secondary"
@@ -372,11 +473,11 @@ export function PreferencesView() {
               </button>
               <button
                 type="button"
-                className="btn-danger"
+                className="btn-danger-confirm"
                 onClick={handleResetData}
                 disabled={resetting}
               >
-                {resetting ? 'Resetting...' : 'Yes, Reset All Data'}
+                {resetting ? 'Resetting...' : 'Yes, Reset All Records'}
               </button>
             </div>
           </div>

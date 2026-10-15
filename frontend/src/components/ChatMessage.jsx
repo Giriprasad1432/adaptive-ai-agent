@@ -1,6 +1,5 @@
 import React, { useState } from 'react'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { AgentActivityTrace } from './AgentActivityTrace'
 
 export const ChatMessage = React.memo(function ChatMessage({
   message,
@@ -22,19 +21,17 @@ export const ChatMessage = React.memo(function ChatMessage({
     }
   }
 
-  const hasSteps = Array.isArray(message.steps) && message.steps.length > 0
-
   return (
     <article className={`message-card ${message.role}`}>
       <div className="message-layout">
         <div className="message-avatar-wrap" aria-hidden="true">
           {isAssistant ? (
-            <div className="avatar assistant-avatar" title="StudyPilot Adaptive Agent">
-              <span className="avatar-symbol">⚡</span>
+            <div className="avatar assistant-avatar" title="StudyPilot AI Tutor">
+              <span className="avatar-symbol">🤖</span>
             </div>
           ) : (
-            <div className="avatar user-avatar" title="You">
-              <span className="avatar-symbol">👤</span>
+            <div className="avatar user-avatar" title="Alex">
+              <span className="avatar-symbol">A</span>
             </div>
           )}
         </div>
@@ -61,12 +58,7 @@ export const ChatMessage = React.memo(function ChatMessage({
             </div>
           </div>
 
-          {/* Real Agent Activity Trace shown for tool calls & agent reasoning */}
-          {isAssistant && hasSteps && (
-            <AgentActivityTrace steps={message.steps} success={message.success !== false} />
-          )}
-
-          {/* Markdown content */}
+          {/* Clean Markdown content */}
           <div className="message-prose">
             <MarkdownRenderer content={message.content} />
           </div>
@@ -167,13 +159,13 @@ export const ChatMessage = React.memo(function ChatMessage({
             </div>
           )}
 
-          {/* Failure or Partial Failure notice */}
+          {/* Failure Notice */}
           {isAssistant && message.success === false && (
             <div className="message-failure-alert" role="alert">
               <div className="failure-alert-body">
                 <span className="failure-icon" aria-hidden="true">⚠</span>
                 <span className="failure-text">
-                  Action was not completed by the agent. Review the error details or retry.
+                  StudyPilot could not complete this response. Please retry.
                 </span>
               </div>
               {canRetry && onRetry && (
@@ -183,7 +175,7 @@ export const ChatMessage = React.memo(function ChatMessage({
                   onClick={onRetry}
                   aria-label="Retry this request"
                 >
-                  ↺ Retry Request
+                  ↺ Retry
                 </button>
               )}
             </div>
