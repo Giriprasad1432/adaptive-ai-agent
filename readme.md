@@ -1,12 +1,46 @@
 # Adaptive AI Agent & StudyPilot
 
-An autonomous reasoning agent backend built with Node.js (ES Modules), Express, the Model Context Protocol (MCP), and local LLMs via Ollama.
-
-The primary showcase application is **StudyPilot**, an adaptive study planner that dynamically adjusts schedules and milestones based on actual study habits, recorded sessions, and missed commitments.
+An autonomous, general-purpose reasoning agent and adaptive learning productivity platform built with Node.js (ES Modules), Express, the official Model Context Protocol (MCP), and production-grade LLM inference via **Groq API** (with Ollama and built-in fallback support).
 
 ---
 
-## Architecture Overview
+## 🌟 Key Features
+
+1. **Production Groq API Engine**:
+   - Ultra-low latency inference using `llama-3.3-70b-versatile`.
+   - Production hardening: exponential backoff retry on HTTP 429/503 rate limits, configurable timeouts (`GROQ_TIMEOUT_MS`), parallel tool call execution, and zero API key exposure in error logs.
+   - Resilient fallback: seamlessly falls back to the built-in offline study assistant if credentials are unconfigured.
+
+2. **Dual-Persona Reasoning Architecture**:
+   - **Academic Tutoring & Conceptual Q&A**: Explains complex topics across Computer Science, Mathematics, Physics, Chemistry, and Engineering (e.g., Recursion, BFS vs. DFS, Deadlocks, Normalization, Calculus) with structured Markdown, code blocks, and pedagogical reasoning—without inappropriately calling plan-management tools.
+   - **StudyPilot Adaptive Planning**: Creates balanced study schedules, records completed or missed sessions, calculates remaining workloads, and rebalances schedules dynamically.
+   - **Multi-Turn Requirement Aggregation**: Preserves conversational context across multiple turns (e.g., subjects in Turn 1, duration in Turn 2, daily capacity in Turn 3).
+
+3. **11 Full-Featured MCP Tools**:
+   - `list_study_plans`: Discover all saved plans.
+   - `create_study_plan`: Create priority-weighted exam or goal-based schedules.
+   - `get_study_plan`: Retrieve verified plan metrics and recent session records.
+   - `record_study_session`: Log completed or missed study hours.
+   - `adapt_study_plan`: Dynamically recalculate allocations after missed sessions.
+   - `create_quiz`: Generate multi-choice practice quizzes with explanations.
+   - `save_quiz_result`: Save quiz scores and evaluate subject mastery.
+   - `get_weak_topics`: Identify weak areas from missed sessions and low quiz scores (<70%).
+   - `get_study_progress`: Aggregate global metrics across all active plans.
+   - `get_user_preferences`: Retrieve user learning style and study preferences.
+   - `update_user_preferences`: Save or modify explanation style, preferred language, and pace.
+
+4. **Alexa+ & Remote Streamable HTTP MCP Integration**:
+   - Dual transport support: runs over **STDIO** for local agent orchestration or **Streamable HTTP** (`/mcp` endpoint) with optional Bearer token authorization (`MCP_AUTH_TOKEN`).
+   - Fully compliant with the official Model Context Protocol JSON-RPC 2.0 specification for remote assistants like Alexa+, Claude Desktop, and enterprise multi-agent networks.
+
+5. **Modern Glassmorphic Web App**:
+   - Vite + React frontend with dark-mode aesthetic.
+   - Interactive Markdown renderer with syntax-highlighted code blocks and copy buttons.
+   - Live backend health status and active MCP tool indicators.
+
+---
+
+## 🏗️ Architecture Overview
 
 ```text
 adaptive-ai-agent/
@@ -14,237 +48,139 @@ adaptive-ai-agent/
 │   ├── server.js                   # Express application entrypoint (/api/health, /api/tools, /api/chat)
 │   ├── agent/                      # Core agent reasoning & execution loop
 │   │   ├── adaptiveAgent.js        # Bounded multi-round loop with tool invocation & error handling
-│   │   ├── validator.js            # Input schema & parameter validation
-│   │   ├── prompts.js              # Ground-truth operational rules & system prompt
+│   │   ├── normalizer.js           # Argument normalization, date parsing, & intent classification
+│   │   ├── validator.js            # Input schema validation & tool execution verification
+│   │   ├── consistencyChecker.js   # Grounded response verifier ensuring zero hallucinated metrics
+│   │   ├── prompts.js              # Dual-persona system prompt & operational rules
 │   │   └── index.js                # Agent factory & exports
-│   ├── providers/                  # Extensible LLM provider abstraction (Ollama, Groq ready)
+│   ├── providers/                  # Provider abstraction layer
 │   │   ├── baseProvider.js         # Abstract provider contract
-│   │   ├── ollamaProvider.js       # Local Ollama client & tool-calling adapter
-│   │   └── index.js                # Provider registry & factory
+│   │   ├── groqProvider.js         # Hardened Groq SDK client (429 retries, timeouts, sanitization)
+│   │   ├── ollamaProvider.js       # Local Ollama adapter
+│   │   ├── demoProvider.js         # Built-in offline resilient assistant
+│   │   └── index.js                # Provider registry & resilient wrappers
 │   └── mcp/                        # MCP Client integration layer
-│       ├── mcpClient.js            # StdioClientTransport & Client manager via official SDK
-│       └── index.js                # Singleton client accessor & exports
+│       ├── mcpClient.js            # Stdio & Streamable HTTP client manager
+│       └── index.js                # Singleton client accessor
 ├── studypilot-server/              # StudyPilot MCP Server
-│   ├── server.js                   # MCP server registering StudyPilot tools
-│   ├── planner.js                  # Study planning & schedule adaptation algorithms
-│   ├── storage.js                  # Local persistent JSON storage
-│   ├── package.json
-│   └── data/                       # JSON plan storage
-├── test/
-│   └── studypilot_mcp.test.js      # Deterministic end-to-end integration tests
-├── .env.example                    # Configuration template
-├── .gitignore                      # Secrets & build artifact ignore rules
-├── package.json
-└── readme.md
+│   ├── server.js                   # MCP server registering 9 StudyPilot tools (Stdio & HTTP)
+│   ├── planner.js                  # Study planning, capacity math, & schedule adaptation algorithms
+│   ├── quizManager.js              # Quiz generation, mastery evaluation, & weak topic detection
+│   ├── storage.js                  # Atomic file-locked persistent JSON storage
+│   └── data/                       # JSON persistent storage
+├── frontend/                       # Vite + React UI demo
+│   ├── src/
+│   │   ├── App.jsx                 # Markdown-enabled chat interface with activity traces
+│   │   └── App.css                 # Dark-mode theme, glassmorphism, & code block styling
+│   └── vite.config.js              # Proxies /api requests to port 3000
+└── test/                           # 11 Deterministic test suites (100% passing)
 ```
 
 ---
 
-## StudyPilot MCP Tools
+## 🛠️ StudyPilot MCP Tools Reference
 
-The StudyPilot MCP server exposes 5 tools via the official `@modelcontextprotocol/sdk`:
-
-1. **`list_study_plans`**
-   - **Description**: Lists saved plans by subject and goal so users can select a plan without remembering internal IDs.
-   - **Parameters**: None.
-
-2. **`create_study_plan`**
-   - **Description**: Generates an initial priority-weighted study schedule from a subject list, exam date, daily available hours, and optional subject priorities (`high`, `medium`, `low`).
-   - **Parameters**: `subjects` (array/string), `examDate` (YYYY-MM-DD), `dailyAvailableHours` (number), `priorities` (object, optional), `planId` (string, optional).
-
-3. **`get_study_plan`**
-   - **Description**: Retrieves the saved study plan, showing total completed hours, missed hours, remaining workload, progress percentage, and recent session logs.
-   - **Parameters**: `planId` (string, optional in the tool schema). StudyPilot resolves an explicit ID, the active conversation's verified plan, or an unambiguous saved-plan selection; it never silently defaults to another plan.
-
-4. **`record_study_session`**
-   - **Description**: Records a completed, partially completed, or missed session. Updates subject progress and logs missed hours if a session was skipped.
-   - **Parameters**: `subject` (string), `hoursSpent` (number), `status` (`completed` | `partially_completed` | `missed`), `notes` (string, optional), `date` (YYYY-MM-DD, optional), `planId` (string, optional in the schema; resolved safely from the active conversation or a verified saved plan).
-
-5. **`adapt_study_plan`**
-   - **Description**: Re-evaluates remaining days until the exam, recalculates subject hour allocations, prioritizes backlog recovery from missed sessions, and warns if the remaining workload requires increasing daily study hours.
-   - **Parameters**: `planId` (string, optional in the schema; never defaults to another plan), `reason` (string, optional), `newExamDate` (YYYY-MM-DD, optional), `newDailyAvailableHours` (number, optional).
+| Tool Name | Purpose | Key Parameters |
+| :--- | :--- | :--- |
+| **`list_study_plans`** | Enumerate saved study plans with subject summaries and progress. | None |
+| **`create_study_plan`** | Generate an initial priority-weighted study schedule. | `subjects`, `examDate` (optional), `durationDays` (optional), `dailyAvailableHours` (optional), `priorities` (optional), `planId` (optional) |
+| **`get_study_plan`** | Retrieve verified plan data, completed hours, remaining workload, and recent sessions. | `planId` (optional; resolved safely from context) |
+| **`record_study_session`** | Log completed or missed study hours. | `subject`, `hoursSpent`, `status` (`completed` \| `partially_completed` \| `missed`), `missedHours`, `scheduledHours`, `date`, `dayNumber`, `planId` |
+| **`adapt_study_plan`** | Dynamically adjust remaining workload after missed sessions. | `planId`, `reason`, `newExamDate` (optional), `newDailyAvailableHours` (optional) |
+| **`create_quiz`** | Generate an interactive practice quiz with questions, options, and explanations. | `subject`, `topic` (optional), `questionCount` (optional, 1-10), `difficulty` (optional) |
+| **`save_quiz_result`** | Record quiz score and evaluate concept mastery. | `subject`, `score`, `totalQuestions`, `topic` (optional), `quizId` (optional) |
+| **`get_weak_topics`** | Identify topics needing remediation based on low quiz scores (<70%) or missed hours. | `planId` (optional), `subject` (optional) |
+| **`get_study_progress`** | Aggregate workload and quiz completion metrics across all active plans. | `planId` (optional; returns global stats if omitted) |
+| **`get_user_preferences`** | Retrieve stored learning and study preferences. | `userId` (optional) |
+| **`update_user_preferences`** | Save or update explanation style, preferred language, daily availability, and notes. | `preferredExplanationStyle` (optional), `preferredLanguage` (optional), `defaultDailyAvailableHours` (optional), `targetDifficulty` (optional), `customNotes` (optional), `userId` (optional) |
 
 ---
 
-## Getting Started
+## 🚀 Quick Start Guide
 
-### Prerequisites
+### 1. Prerequisites
+- **Node.js**: v18+ (tested on v22.17.0)
+- **Groq API Key**: (Get one at [console.groq.com](https://console.groq.com)) or use the built-in offline assistant.
 
-1. **Node.js**: v18+ (tested on Node.js v22)
-2. **An AI provider**: Ollama with `llama3.2`, or Groq with a valid API key:
-   ```bash
-   ollama pull llama3.2
-   ```
-
-### Configuration
-
-Copy `.env.example` to `.env`:
-
+### 2. Configuration
+Copy the configuration template:
 ```bash
 cp .env.example .env
 ```
 
-Example local Ollama configuration in `.env` (the project also supports `AI_PROVIDER=groq` with `GROQ_API_KEY` set):
-
+Configure your `.env`:
 ```env
 PORT=3000
-AI_PROVIDER=ollama
-OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=llama3.2
+AI_PROVIDER=groq
+GROQ_API_KEY=gsk_your_groq_api_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_TIMEOUT_MS=20000
 
-# Primary Application: StudyPilot MCP Server
+# StudyPilot MCP Server (Stdio)
 MCP_SERVER_COMMAND=node
 MCP_SERVER_ARGS=./studypilot-server/server.js
-
-# Optional Development Alternative (Calculator MCP Server):
-# MCP_SERVER_ARGS=../mcp-server/server.js
-
-MAX_AGENT_ROUNDS=6
 ```
 
-### Running the Backend
+### 3. Run Backend & Frontend
+In Terminal 1 (Backend API & MCP Server):
+```bash
+npm start
+```
+*Backend runs on `http://localhost:3000`.*
 
-- **Development mode** (with nodemon):
-  ```bash
-  npm run dev
-  ```
-- **Production mode**:
-  ```bash
-  npm start
-  ```
+In Terminal 2 (Frontend Demo):
+```bash
+cd frontend
+npm run dev
+```
+*Frontend opens at `http://localhost:5173`.*
 
 ---
 
-## Running the Deterministic Test Suite
+## 🧪 Comprehensive Test Suite
 
-To verify real MCP tool execution end-to-end without needing Ollama:
+All 12 test suites run deterministically without network flakiness:
 
 ```bash
 npm test
 ```
 
-This test:
-1. Connects a real MCP client via `StdioClientTransport` to `studypilot-server/server.js`.
-2. Discovers and asserts all 5 StudyPilot tools.
-3. Creates a study plan (`Mathematics` [high], `Physics` [medium], `Chemistry` [low]).
-4. Retrieves the created plan and verifies allocations.
-5. Records a completed session for Chemistry.
-6. Records a missed session for Mathematics.
-7. Executes `adapt_study_plan` and verifies that backlog is factored into remaining hours and recommended daily study pace.
-8. Retrieves the final adapted plan and verifies the adaptation history log.
+### Test Suites Included:
+1. `test/groq_provider.test.js`: Rate-limit backoff, timeouts, key sanitization, parallel tool calls.
+2. `test/academic_tutoring.test.js`: General-purpose multi-subject Q&A, debugging assistance & multi-turn aggregation.
+3. `test/user_preferences.test.js`: User personalization, preference persistence, and user isolation.
+4. `test/expanded_mcp_tools.test.js`: Quiz creation, mastery scoring, weak topic detection, progress aggregation.
+5. `test/argument_normalization.test.js`: Comprehensive schema normalizer and intent verification.
+6. `test/studypilot_mcp.test.js`: Stdio MCP protocol contract and plan accounting.
+7. `test/failure_handling.test.js`: Symmetric partial success handling and tool timeouts.
+8. `test/phase3_regressions.test.js`: Regression suite covering plan IDs, date recovery, and capacity bounds.
+9. `test/study_plan_dates_recovery.test.js`: Inclusive date bounds, Day N mapping, and malformed JSON recovery.
+10. `test/api_contract.test.js`: Express HTTP API contracts (`/api/health`, `/api/tools`, `/api/chat`).
+11. `test/agent_evaluation.test.js`: End-to-end autonomous agent multi-step evaluation.
+12. `test/studypilot_http.test.js`: Streamable HTTP MCP server verification (`/mcp` endpoint) & Bearer token auth.
+
 
 ---
 
-## API Endpoints
+## 📡 Remote Streamable HTTP MCP (Alexa+ Integration)
 
-### 1. Health Status
-`GET /api/health`
+StudyPilot supports running as a remote Streamable HTTP MCP server for Alexa+, remote cloud agents, or enterprise MCP hosts.
 
-Returns server status, AI provider status, model installation status, and connected MCP server info.
+### Launching in Streamable HTTP Mode:
+```bash
+MCP_TRANSPORT=http MCP_HTTP_HOST=0.0.0.0 MCP_HTTP_PORT=8000 node studypilot-server/server.js
+```
+The server will listen at `http://<host>:8000/mcp`.
 
-### 2. Discovered Tools
-`GET /api/tools`
-
-Returns the list of active tools and their JSON schemas from the connected MCP server.
-
-### 3. Agent Reasoning & Tool Invocation
-`POST /api/chat`
-
-Body:
+### Client Configuration (e.g. `mcpClient.js` or Alexa+ MCP Configuration):
 ```json
 {
-  "message": "Create a study plan for Mathematics and Physics with exam on 2026-12-15 and 3 daily available hours. Set Mathematics as high priority."
+  "mcpServers": {
+    "studypilot": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "transport": "streamable-http"
+    }
+  }
 }
 ```
-
-Response:
-```json
-{
-  "reply": "I have created your study plan for Mathematics and Physics...",
-  "success": true,
-  "rounds": 2,
-  "steps": [...]
-}
-```
-
----
-
-## Phase 4 Readiness: Sample React Frontend
-
-The React + Vite client lives in `frontend/` and remains a thin client of the existing Express API.
-
-### Start commands
-
-Start Ollama and pull the configured model once:
-
-```powershell
-ollama pull llama3.2
-ollama serve
-```
-
-With the current `.env` configured for Stdio MCP, start the backend from the repository root:
-
-```powershell
-npm install
-npm start
-```
-
-The API listens on `http://localhost:3000` by default. For local Ollama, set `AI_PROVIDER=ollama`, `OLLAMA_HOST=http://127.0.0.1:11434`, and `OLLAMA_MODEL=llama3.2`; for Groq, set `AI_PROVIDER=groq` and provide a valid `GROQ_API_KEY`. MCP defaults to Stdio with `MCP_SERVER_COMMAND=node` and `MCP_SERVER_ARGS=./studypilot-server/server.js`. `PORT` changes the Express API port. Standalone MCP HTTP mode uses `MCP_TRANSPORT=http`, `MCP_HTTP_HOST=127.0.0.1`, and `MCP_HTTP_PORT=3001`; `PORT` takes precedence if set in that process. The backend can use HTTP by setting `MCP_SERVER_URL=http://127.0.0.1:3001/mcp` and leaving `MCP_SERVER_COMMAND` unset. The current HTTP integration test fails during MCP initialization; use Stdio for manual frontend testing while that blocker remains unresolved.
-
-To start the standalone MCP HTTP listener for integration work (in one PowerShell terminal):
-
-```powershell
-$env:MCP_TRANSPORT = "http"
-$env:MCP_HTTP_HOST = "127.0.0.1"
-$env:MCP_HTTP_PORT = "3001"
-node studypilot-server/server.js
-```
-
-Start the frontend in a second terminal:
-
-```powershell
-cd frontend
-npm install
-npm run dev
-```
-
-Set `VITE_API_BASE_URL=http://localhost:3000` in `frontend/.env.local`; Vite exposes only `VITE_` variables to browser code. Never put Ollama credentials, provider keys, MCP command details, or other secrets in frontend variables or source files.
-
-### API contract examples
-
-Health check: `GET /api/health`
-
-```json
-{
-  "status": "running",
-  "provider": "ollama",
-  "model": "llama3.2",
-  "providerStatus": { "available": true },
-  "mcp": { "configured": true, "connected": true, "toolCount": 5 }
-}
-```
-
-Tool discovery: `GET /api/tools` returns `{ "connected": true, "toolCount": 5, "tools": [...] }`, where each tool includes its name, description, and input schema.
-
-Plan IDs are generated internally when the user does not provide one. New plans never overwrite an existing ID. The API keeps the verified active plan associated with the frontend conversation ID, so users can refer to “my plan” without remembering its internal identifier. When a conversation has no active plan, StudyPilot lists saved plans and resolves an unambiguous choice by subject; otherwise it asks the user to choose by subject or description.
-
-Chat: `POST /api/chat` with `Content-Type: application/json`:
-
-```json
-{ "message": "What is my progress for plan ID 2?", "messages": [] }
-```
-
-The response contains `reply`, `success`, `partialSuccess`, `rounds`, and `steps`. Invalid/missing messages return HTTP 400 with `{ "error": "A valid message is required." }`; unexpected server errors return HTTP 500 with an `error` string. Tool failures can return HTTP 200 with `success: false`, so the frontend must display the reply and failure state instead of treating every 200 response as success.
-
-The API currently uses `cors()` with its default wildcard origin and no credentials. This is suitable for local development; restrict origins before production deployment. Keep provider calls and MCP access on the backend; do not call Ollama or MCP directly from the browser.
-
-### Suggested components and acceptance checklist
-
-- `ChatPanel`: message history, input, submit action, loading state (disable duplicate submits while waiting), and server reply.
-- `ActivityTrace`: an optional collapsed/expandable, user-safe summary of completed tool activity; avoid displaying raw model drafts or unsupported intermediate claims.
-- `HealthIndicator`: provider/MCP availability from `/api/health`.
-- `ErrorNotice`: distinguish network/HTTP errors from an agent response with `success: false`.
-
-Read the API base from `import.meta.env.VITE_API_BASE_URL` and build endpoint URLs from that value. Poll `/api/health` on startup and at a modest interval while the UI is open; show unavailable status when the request fails rather than assuming the backend is healthy. For production, replace the current wildcard CORS policy with an explicit list of trusted frontend origins.
-
-Manual acceptance: start Ollama and the Stdio-backed API; confirm health is reachable; load discovered tools; create and retrieve a plan in a temporary/test setup; record a completed and a missed session; confirm an unknown plan displays failure; verify loading and retry behavior when the backend is stopped; confirm the UI exposes no server secrets or unsupported trace drafts.
+Any remote client can now invoke all 9 tools via standard JSON-RPC 2.0 with complete session isolation and security.

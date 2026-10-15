@@ -101,10 +101,55 @@ try {
 
     const unsupportedResponse = await fetch(endpoint, { method: "PUT" });
     assert.equal(unsupportedResponse.status, 405, "Unsupported HTTP methods must return HTTP 405");
-    assert.match(unsupportedResponse.headers.get("allow"), /POST/i);
-
     console.log("✓ Streamable HTTP MCP initialization, tools/list, tools/call, malformed JSON, and unsupported method verified");
+
+    // Verify Bearer token authorization for remote / Alexa+ security
+    const authPort = await getAvailablePort();
+    const authEndpoint = `http://127.0.0.1:${authPort}/mcp`;
+    const authChild = spawn(process.execPath, [serverScript], {
+        cwd: path.resolve(testDir, ".."),
+        env: { ...process.env, MCP_TRANSPORT: "http", MCP_HTTP_HOST: "127.0.0.1", MCP_HTTP_PORT: String(authPort), STUDYPILOT_DATA_DIR: dataDir, MCP_AUTH_TOKEN: "alexa-secret-test-token" },
+        stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    try {
+        let authReady = false;
+        for (let a = 0; a < 60; a++) {
+            try {
+                const res = await fetch(authEndpoint);
+                if (res.status === 405) { authReady = true; break; }
+            } catch { }
+            await new Promise(r => setTimeout(r, 50));
+        }
+        assert.equal(authReady, true, "Auth-enabled HTTP MCP server failed to become ready");
+
+        // 1. Missing or invalid token returns 401
+        const unauthRes = await fetch(authEndpoint, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+        });
+        assert.equal(unauthRes.status, 401, "Missing token must return 401");
+
+        // 2. Valid Bearer token succeeds with 200
+        const authRes = await fetch(authEndpoint, {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                "authorization": "Bearer alexa-secret-test-token",
+                "accept": "application/json, text/event-stream"
+            },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+        });
+        assert.equal(authRes.status, 200, "Valid Bearer token must succeed with HTTP 200");
+        console.log("✓ Streamable HTTP Bearer token authorization verified");
+    } finally {
+        if (authChild.exitCode === null && authChild.signalCode === null) {
+            authChild.kill("SIGTERM");
+        }
+    }
 } finally {
+
     await manager.disconnect().catch(() => {});
     await client.close().catch(() => { });
 

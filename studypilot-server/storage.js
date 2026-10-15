@@ -293,3 +293,123 @@ export function updatePlan(planId = "default", mutatorFn, targetFile = DATA_FILE
         return { plan: plans[planId], result: mutatorResult };
     }, 5000, 25, lockFile);
 }
+
+export const PREFERENCES_FILE = path.join(DATA_DIR, "studypilot_preferences.json");
+
+/**
+ * Load all user preferences from disk
+ * @param {string} [targetFile=PREFERENCES_FILE]
+ * @returns {Record<string, any>}
+ */
+export function loadAllPreferences(targetFile = PREFERENCES_FILE) {
+    ensureDataDir(path.dirname(targetFile));
+    if (!fs.existsSync(targetFile)) {
+        return {};
+    }
+    try {
+        const raw = fs.readFileSync(targetFile, "utf-8");
+        return JSON.parse(raw) || {};
+    } catch {
+        return {};
+    }
+}
+
+/**
+ * Retrieve preferences for a specific user ID
+ * @param {string} [userId="default"]
+ * @param {string} [targetFile=PREFERENCES_FILE]
+ */
+export function getUserPreferences(userId = "default", targetFile = PREFERENCES_FILE) {
+    const all = loadAllPreferences(targetFile);
+    const existing = all[userId];
+    if (existing) {
+        return {
+            userId,
+            goal: existing.goal || "",
+            subjects: Array.isArray(existing.subjects) ? existing.subjects : [],
+            currentLevel: existing.currentLevel || existing.targetDifficulty || "intermediate",
+            startingPoint: existing.startingPoint || "",
+            difficultTopics: Array.isArray(existing.difficultTopics) ? existing.difficultTopics : [],
+            targetDeadline: existing.targetDeadline || "",
+            learningPreference: existing.learningPreference || existing.preferredExplanationStyle || "detailed",
+            studySchedule: existing.studySchedule || "",
+            preferredExplanationStyle: existing.preferredExplanationStyle || "detailed",
+            preferredLanguage: existing.preferredLanguage || "JavaScript",
+            defaultDailyAvailableHours: existing.defaultDailyAvailableHours ?? 2,
+            targetDifficulty: existing.targetDifficulty || "intermediate",
+            customNotes: existing.customNotes || "",
+            onboardingCompleted: Boolean(existing.onboardingCompleted),
+            updatedAt: existing.updatedAt || null
+        };
+    }
+    return {
+        userId,
+        goal: "",
+        subjects: [],
+        currentLevel: "intermediate",
+        startingPoint: "",
+        difficultTopics: [],
+        targetDeadline: "",
+        learningPreference: "detailed",
+        studySchedule: "",
+        preferredExplanationStyle: "detailed",
+        preferredLanguage: "JavaScript",
+        defaultDailyAvailableHours: 2,
+        targetDifficulty: "intermediate",
+        customNotes: "",
+        onboardingCompleted: false
+    };
+}
+
+/**
+ * Save or update learning preferences for a user
+ * @param {string} [userId="default"]
+ * @param {Object} preferences
+ * @param {string} [targetFile=PREFERENCES_FILE]
+ */
+export function saveUserPreferences(userId = "default", preferences = {}, targetFile = PREFERENCES_FILE) {
+    const lockFile = `${targetFile}.lock`;
+    return withFileLock(() => {
+        const all = loadAllPreferences(targetFile);
+        const existing = all[userId] || { userId };
+        const updated = {
+            ...existing,
+            ...preferences,
+            userId,
+            updatedAt: new Date().toISOString()
+        };
+        all[userId] = updated;
+        _saveAllPlansUnlocked(all, targetFile);
+        return updated;
+    }, 5000, 25, lockFile);
+}
+
+/**
+ * Reset stored user data (plans, preferences) cleanly under file lock.
+ * Only invoked when user explicitly requests a reset.
+ * @param {string} [userId="default"]
+ * @param {string} [targetPlanFile=DATA_FILE]
+ * @param {string} [targetPrefsFile=PREFERENCES_FILE]
+ */
+export function resetLearningData(userId = "default", targetPlanFile = DATA_FILE, targetPrefsFile = PREFERENCES_FILE) {
+    // 1. Reset plans under plan file lock
+    const planLock = `${targetPlanFile}.lock`;
+    withFileLock(() => {
+        _saveAllPlansUnlocked({}, targetPlanFile);
+    }, 5000, 25, planLock);
+
+    // 2. Reset preferences under prefs file lock
+    const prefsLock = `${targetPrefsFile}.lock`;
+    withFileLock(() => {
+        const all = loadAllPreferences(targetPrefsFile);
+        delete all[userId];
+        _saveAllPlansUnlocked(all, targetPrefsFile);
+    }, 5000, 25, prefsLock);
+
+    return {
+        success: true,
+        message: `Learning data and study plans have been cleanly reset for user "${userId}".`
+    };
+}
+
+

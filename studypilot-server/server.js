@@ -4,8 +4,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { getPlan, loadAllPlans, saveNewPlan, updatePlan } from "./storage.js";
+import { getPlan, loadAllPlans, saveNewPlan, updatePlan, getUserPreferences, saveUserPreferences, resetLearningData } from "./storage.js";
 import { createPlan, recordSession, adaptPlan, getActiveSessionCount, resolvePlanDayDate } from "./planner.js";
+import { createQuiz, saveQuizResult, getWeakTopics, getStudyProgress, resetQuizData } from "./quizManager.js";
 
 function createMcpServer() {
     // Initialize the StudyPilot MCP Server
@@ -388,8 +389,233 @@ function createMcpServer() {
         }
     );
 
+    // 6. Tool: create_quiz
+    mcp.tool(
+        "create_quiz",
+        "Generate a practice quiz for a subject or topic with multiple-choice questions, options, difficulty level, and answer explanations.",
+        {
+            subject: z.string().describe("Subject name (e.g. 'JavaScript', 'DBMS', 'Operating Systems', 'Mathematics')"),
+            topic: z.string().optional().describe("Specific topic or concept within the subject (e.g. 'Recursion', 'Deadlocks', 'Normalization')"),
+            questionCount: z.number().int().optional().describe("Number of questions to generate (1 to 10, default 3)"),
+            difficulty: z.enum(["beginner", "intermediate", "advanced"]).optional().describe("Quiz difficulty level (default: 'intermediate')")
+        },
+        async ({ subject, topic, questionCount, difficulty }) => {
+            try {
+                const quiz = createQuiz({ subject, topic, questionCount, difficulty });
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify(quiz, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to create quiz: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+    // 7. Tool: save_quiz_result
+    mcp.tool(
+        "save_quiz_result",
+        "Record a completed quiz score, evaluate subject mastery, and detect weak topics for adaptive study revision.",
+        {
+            subject: z.string().describe("Subject name"),
+            score: z.number().describe("Number of questions answered correctly"),
+            totalQuestions: z.number().describe("Total number of questions in the quiz"),
+            topic: z.string().optional().describe("Topic or concept of the quiz"),
+            quizId: z.string().optional().describe("Optional identifier of the quiz that was completed")
+        },
+        async ({ subject, score, totalQuestions, topic, quizId }) => {
+            try {
+                const outcome = saveQuizResult({ subject, score, totalQuestions, topic, quizId });
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify(outcome, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to save quiz result: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+    // 8. Tool: get_weak_topics
+    mcp.tool(
+        "get_weak_topics",
+        "Identify academic subjects or topics requiring extra review based on missed study sessions and quiz scores below 70%.",
+        {
+            planId: z.string().optional().describe("Optional plan identifier to restrict analysis to a specific study plan"),
+            subject: z.string().optional().describe("Optional subject name to filter weak topic analysis")
+        },
+        async ({ planId, subject }) => {
+            try {
+                const report = getWeakTopics({ planId, subject });
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify(report, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to analyze weak topics: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+    // 9. Tool: get_study_progress
+    mcp.tool(
+        "get_study_progress",
+        "Get high-level aggregated study progress, total hours completed, remaining workload, and quiz performance metrics across all active plans or for a specific plan.",
+        {
+            planId: z.string().optional().describe("Optional plan identifier to view progress for a specific plan. If omitted, returns global progress across all plans.")
+        },
+        async ({ planId }) => {
+            try {
+                const progress = getStudyProgress({ planId });
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify(progress, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to retrieve study progress: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+    // 10. Tool: get_user_preferences
+    mcp.tool(
+        "get_user_preferences",
+        "Retrieve stored learning and study preferences (e.g. explanation style, preferred language, default daily availability, difficulty, custom notes).",
+        {
+            userId: z.string().optional().describe("User identifier (default: 'default')")
+        },
+        async ({ userId = "default" }) => {
+            try {
+                const prefs = getUserPreferences(userId);
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify(prefs, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to retrieve user preferences: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+    // 11. Tool: update_user_preferences
+    mcp.tool(
+        "update_user_preferences",
+        "Save or update user learning preferences such as onboarding goal, subjects, current level, starting knowledge, deadline, preferred explanation style ('short', 'detailed', 'code_first', 'intuitive'), preferred programming language, default daily study hours, target difficulty, or custom notes.",
+        {
+            userId: z.string().optional().describe("User identifier (default: 'default')"),
+            goal: z.string().optional().describe("User's primary learning goal (e.g. 'Learn Java for backend development')"),
+            subjects: z.array(z.string()).optional().describe("List of target subjects or topics"),
+            currentLevel: z.string().optional().describe("User's self-assessed level: 'beginner', 'basics', 'intermediate', or 'advanced'"),
+            startingPoint: z.string().optional().describe("What the user already knows or current starting point"),
+            difficultTopics: z.array(z.string()).optional().describe("Topics identified as difficult or needing extra review"),
+            targetDeadline: z.string().optional().describe("Target exam or completion date or period"),
+            learningPreference: z.string().optional().describe("User's preferred learning style (e.g. 'hands-on', 'explanations', 'quizzes', 'mix')"),
+            studySchedule: z.string().optional().describe("Preferred study schedule (e.g. 'weekdays', 'daily', 'evenings')"),
+            preferredExplanationStyle: z.enum(["short", "detailed", "code_first", "intuitive"]).optional().describe("Preferred explanation style"),
+            preferredLanguage: z.string().optional().describe("Preferred programming language (e.g. 'Java', 'Python', 'JavaScript', 'C++')"),
+            defaultDailyAvailableHours: z.number().min(0.5).max(12).optional().describe("Default daily study availability in hours (0.5 to 12)"),
+            targetDifficulty: z.enum(["beginner", "intermediate", "advanced"]).optional().describe("Default learning and quiz difficulty level"),
+            customNotes: z.string().optional().describe("Custom learning preferences or notes"),
+            onboardingCompleted: z.boolean().optional().describe("Whether conversational onboarding is complete")
+        },
+        async ({
+            userId = "default",
+            goal,
+            subjects,
+            currentLevel,
+            startingPoint,
+            difficultTopics,
+            targetDeadline,
+            learningPreference,
+            studySchedule,
+            preferredExplanationStyle,
+            preferredLanguage,
+            defaultDailyAvailableHours,
+            targetDifficulty,
+            customNotes,
+            onboardingCompleted
+        }) => {
+            try {
+                const updates = {};
+                if (goal !== undefined) updates.goal = goal;
+                if (subjects !== undefined) updates.subjects = subjects;
+                if (currentLevel !== undefined) updates.currentLevel = currentLevel;
+                if (startingPoint !== undefined) updates.startingPoint = startingPoint;
+                if (difficultTopics !== undefined) updates.difficultTopics = difficultTopics;
+                if (targetDeadline !== undefined) updates.targetDeadline = targetDeadline;
+                if (learningPreference !== undefined) updates.learningPreference = learningPreference;
+                if (studySchedule !== undefined) updates.studySchedule = studySchedule;
+                if (preferredExplanationStyle !== undefined) updates.preferredExplanationStyle = preferredExplanationStyle;
+                if (preferredLanguage !== undefined) updates.preferredLanguage = preferredLanguage;
+                if (defaultDailyAvailableHours !== undefined) updates.defaultDailyAvailableHours = defaultDailyAvailableHours;
+                if (targetDifficulty !== undefined) updates.targetDifficulty = targetDifficulty;
+                if (customNotes !== undefined) updates.customNotes = customNotes;
+                if (onboardingCompleted !== undefined) updates.onboardingCompleted = onboardingCompleted;
+
+                const saved = saveUserPreferences(userId, updates);
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify({ message: "User preferences updated successfully.", preferences: saved }, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to update user preferences: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+    // 12. Tool: reset_learning_data
+    mcp.tool(
+        "reset_learning_data",
+        "Cleanly reset user study plans, session logs, preferences, and quizzes when explicitly requested by the user. NEVER call without explicit user confirmation.",
+        {
+            confirm: z.boolean().describe("Must be true to confirm reset"),
+            userId: z.string().optional().describe("User identifier (default: 'default')")
+        },
+        async ({ confirm, userId = "default" }) => {
+            try {
+                if (!confirm) {
+                    return {
+                        isError: true,
+                        content: [{ type: "text", text: "Reset was not confirmed. User data remains untouched." }]
+                    };
+                }
+                const resetResult = resetLearningData(userId);
+                resetQuizData();
+                return {
+                    isError: false,
+                    content: [{ type: "text", text: JSON.stringify({ message: resetResult.message, reset: true }, null, 2) }]
+                };
+            } catch (error) {
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: `Failed to reset learning data: ${error.message}` }]
+                };
+            }
+        }
+    );
+
+
     return mcp;
 }
+
 
 const transportMode = (process.env.MCP_TRANSPORT || "stdio").toLowerCase();
 
@@ -448,6 +674,21 @@ if (transportMode === "stdio") {
                 id: null
             }));
             return;
+        }
+
+        const requiredAuthToken = process.env.MCP_AUTH_TOKEN;
+        if (requiredAuthToken) {
+            const authHeader = req.headers.authorization || "";
+            const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : authHeader.trim();
+            if (token !== requiredAuthToken) {
+                res.writeHead(401, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    jsonrpc: "2.0",
+                    error: { code: -32001, message: "Unauthorized. A valid Bearer token is required." },
+                    id: null
+                }));
+                return;
+            }
         }
 
         const mcp = createMcpServer();

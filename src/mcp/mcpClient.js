@@ -30,6 +30,8 @@ export class McpClientManager {
             ? config.toolTimeoutMs
             : (Number(process.env.MCP_TOOL_TIMEOUT_MS) || 20000);
 
+        this.authToken = config.authToken || process.env.MCP_AUTH_TOKEN || null;
+
         this.client = null;
         this.transport = null;
         this.tools = [];
@@ -107,8 +109,13 @@ export class McpClientManager {
 
             const appNodeModules = path.resolve(__dirname, "../../node_modules");
             if (this.url) {
+                const authToken = this.authToken || process.env.MCP_AUTH_TOKEN;
+                const transportOpts = authToken
+                    ? { requestInit: { headers: { Authorization: `Bearer ${authToken}` } } }
+                    : {};
                 this.transport = new StreamableHTTPClientTransport(
-                    new URL(this.url)
+                    new URL(this.url),
+                    transportOpts
                 );
 
                 console.log(

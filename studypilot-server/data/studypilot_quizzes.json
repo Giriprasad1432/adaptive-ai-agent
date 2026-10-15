@@ -1,0 +1,97 @@
+{
+  "quizzes": {
+    "quiz-dbms-d5a56baf": {
+      "quizId": "quiz-dbms-d5a56baf",
+      "subject": "Dbms",
+      "topic": "Dbms",
+      "difficulty": "intermediate",
+      "questionCount": 3,
+      "createdAt": "2026-10-14T07:49:38.992Z",
+      "questions": [
+        {
+          "questionId": "q_1",
+          "question": "Which normal form requires the elimination of transitive functional dependencies?",
+          "options": [
+            "First Normal Form (1NF)",
+            "Second Normal Form (2NF)",
+            "Third Normal Form (3NF)",
+            "Boyce-Codd Normal Form (BCNF)"
+          ],
+          "correctOptionIndex": 2,
+          "explanation": "3NF requires a relation to be in 2NF and have no non-prime attribute transitively dependent on any candidate key."
+        },
+        {
+          "questionId": "q_2",
+          "question": "In ACID properties of transactions, what does 'Atomicity' guarantee?",
+          "options": [
+            "All operations within a transaction succeed completely or none take effect",
+            "The database remains in a consistent state before and after execution",
+            "Concurrent transactions execute without interfering with one another",
+            "Committed changes survive system crashes"
+          ],
+          "correctOptionIndex": 0,
+          "explanation": "Atomicity is the 'all-or-nothing' property ensuring partial transaction executions never persist."
+        },
+        {
+          "questionId": "q_3",
+          "question": "Which index structure is most widely utilized in relational databases for range queries?",
+          "options": [
+            "Hash Index",
+            "B+ Tree Index",
+            "Inverted Index",
+            "Bitmap Index"
+          ],
+          "correctOptionIndex": 1,
+          "explanation": "B+ trees store all data pointers in leaf nodes linked sequentially, making range scans $O(\\log n + k)$."
+        }
+      ]
+    },
+    "quiz-dbms-892362e6": {
+      "quizId": "quiz-dbms-892362e6",
+      "subject": "Dbms",
+      "topic": "Dbms",
+      "difficulty": "intermediate",
+      "questionCount": 3,
+      "createdAt": "2026-10-14T07:53:01.461Z",
+      "questions": [
+        {
+          "questionId": "q_1",
+          "question": "Which normal form requires the elimination of transitive functional dependencies?",
+          "options": [
+            "First Normal Form (1NF)",
+            "Second Normal Form (2NF)",
+            "Third Normal Form (3NF)",
+            "Boyce-Codd Normal Form (BCNF)"
+          ],
+          "correctOptionIndex": 2,
+          "explanation": "3NF requires a relation to be in 2NF and have no non-prime attribute transitively dependent on any candidate key."
+        },
+        {
+          "questionId": "q_2",
+          "question": "In ACID properties of transactions, what does 'Atomicity' guarantee?",
+          "options": [
+            "All operations within a transaction succeed completely or none take effect",
+            "The database remains in a consistent state before and after execution",
+            "Concurrent transactions execute without interfering with one another",
+            "Committed changes survive system crashes"
+          ],
+          "correctOptionIndex": 0,
+          "explanation": "Atomicity is the 'all-or-nothing' property ensuring partial transaction executions never persist."
+        },
+        {
+          "questionId": "q_3",
+          "question": "Which index structure is most widely utilized in relational databases for range queries?",
+          "options": [
+            "Hash Index",
+            "B+ Tree Index",
+            "Inverted Index",
+            "Bitmap Index"
+          ],
+          "correctOptionIndex": 1,
+          "explanation": "B+ trees store all data pointers in leaf nodes linked sequentially, making range scans $O(\\log n + k)$."
+        }
+      ]
+    }
+  },
+  "results": []
+}

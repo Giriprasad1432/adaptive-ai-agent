@@ -162,8 +162,11 @@ export class AdaptiveAgent {
             concluded = true;
         }
 
+        const hasExplicitCreateIntent = /\b(?:create|make|build|generate|set up|start|new)\b.{0,40}\b(?:study\s+plan|plan|schedule)\b/i.test(message || "");
+
         const needsExistingPlan = !createContinuation && !resolvedActivePlanId &&
             !concluded &&
+            !hasExplicitCreateIntent &&
             !extractExplicitPlanId(message) &&
             (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message));
         if (needsExistingPlan && tools.some(tool => tool.name === "list_study_plans")) {
@@ -192,7 +195,7 @@ export class AdaptiveAgent {
                     if (subjectMatches.length === 1) {
                         resolvedActivePlanId = subjectMatches[0].planId;
                     } else if (isRetrievalIntent(message) || isSessionRecordingIntent(message) || isAdaptationIntent(message)) {
-                        finalReply = "I found more than one saved study plan and can't safely tell which one you mean. Which plan should I use? You can identify it by its subject or goal.";
+                        finalReply = "Action Failed: I found more than one saved study plan and can't safely tell which one you mean. Which plan should I use? You can identify it by its subject or goal.";
                         completed = false;
                         concluded = true;
                         steps.push({
@@ -673,13 +676,98 @@ export class AdaptiveAgent {
             ? permitsPartialSuccess
             : (completed && turnFailures.length === 0);
 
+        const { quickReplies, planPreview } = extractQuickRepliesAndPreview(finalReply, executedTools);
+
         return {
             success: finalSuccess,
             partialSuccess: isPartial,
             reply: finalReply,
             activePlanId: resolvedActivePlanId,
+            quickReplies,
+            planPreview,
             steps,
             rounds: roundsExecuted
         };
     }
 }
+
+export function extractQuickRepliesAndPreview(reply, executedTools = []) {
+    if (!reply || typeof reply !== "string") {
+        return { quickReplies: [], planPreview: null };
+    }
+
+    const lower = reply.toLowerCase();
+    const quickReplies = [];
+    let planPreview = null;
+
+    // 1. Did create_study_plan succeed in this turn?
+    const createdTool = executedTools.find(t => t.toolName === "create_study_plan" && !t.isError);
+    if (createdTool) {
+        return {
+            quickReplies: ["View Schedule in Planner →", "Teach me first module", "Take a Diagnostic Quiz"],
+            planPreview: null
+        };
+    }
+
+    // 2. Is the reply a Proposed Study Plan awaiting confirmation?
+    if (/proposed (?:study|personalized|learning) plan|here is the (?:personalized )?learning path|does this study path look good|confirm or modify/i.test(reply)) {
+        const goalMatch = reply.match(/\*\*Goal:\*\*\s*([^\n|*]+)/i);
+        const levelMatch = reply.match(/\*\*Level:\*\*\s*([^\n|*]+)/i);
+        const dailyMatch = reply.match(/\*\*Daily Pace:\*\*\s*([^\n|*]+)/i);
+        const timelineMatch = reply.match(/\*\*Target Period:\*\*\s*([^\n|*]+)/i);
+        const subjectMatch = reply.match(/Plan:\s*([^\n#]+)/i);
+
+        const stageMatches = [...reply.matchAll(/(?:Module|Stage)\s*(\d+)[:\s-]*\s*([^\n(]+)(?:\(([^)]+)\))?/gi)];
+        const modules = stageMatches.map(m => ({
+            number: m[1],
+            title: m[2]?.trim(),
+            duration: m[3]?.trim() || ""
+        }));
+
+        planPreview = {
+            title: subjectMatch ? subjectMatch[1].trim() : "Personalized Study Plan",
+            goal: goalMatch ? goalMatch[1].trim() : "",
+            level: levelMatch ? levelMatch[1].trim() : "Beginner",
+            dailyHours: dailyMatch ? dailyMatch[1].trim() : "2 hrs/day",
+            timeline: timelineMatch ? timelineMatch[1].trim() : "14 days",
+            modules: modules.length > 0 ? modules : []
+        };
+
+        return {
+            quickReplies: ["✓ Confirm & Create Plan", "✏ Modify Daily Hours", "✏ Change Deadline", "Take Diagnostic Quiz First"],
+            planPreview
+        };
+    }
+
+    // 3. Experience level question
+    if (/complete beginner|familiar with the basics|already experienced|current experience/i.test(lower)) {
+        quickReplies.push("Complete Beginner", "Know the Basics", "Already Experienced", "Skip");
+    }
+    // 4. Starting point / difficult topics question
+    else if (/already (?:feel )?comfortable with|tricky or unfamiliar|topics are difficult|starting point/i.test(lower)) {
+        quickReplies.push("Start from the ground up", "Know fundamentals, need advanced", "Skip");
+    }
+    // 5. Daily study availability question
+    else if (/dedicate to studying each day|study each day|hours per day|daily available/i.test(lower)) {
+        quickReplies.push("1 hour / day", "2 hours / day", "3 hours / day", "Skip");
+    }
+    // 6. Deadline / Target date question
+    else if (/target date|deadline in mind|upcoming exam|interview deadline/i.test(lower)) {
+        quickReplies.push("In 2 weeks", "In 1 month", "In 3 months", "No strict deadline (Self-paced)", "Skip");
+    }
+    // 7. Learning preference question
+    else if (/preferred (?:way of )?learning|preferred explanation style|hands-on/i.test(lower)) {
+        quickReplies.push("Explanations + Examples", "Hands-on Coding", "Quizzes & Practice", "Balanced Mix", "Skip");
+    }
+    // 8. Study schedule question
+    else if (/preferred study days|study schedule|weekdays only/i.test(lower)) {
+        quickReplies.push("Every day", "Weekdays only", "Weekends only", "Skip");
+    }
+    // 9. Initial onboarding question (Goal / What do you want to learn)
+    else if (/what do you want to learn or achieve|what are we learning today/i.test(lower)) {
+        quickReplies.push("Learn Java from scratch", "Master Python for Data Science", "Web Development with JavaScript", "Prepare for Computer Science Exams");
+    }
+
+    return { quickReplies, planPreview };
+}
+

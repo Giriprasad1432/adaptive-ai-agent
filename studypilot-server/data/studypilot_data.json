@@ -9058,5 +9058,294 @@
     },
     "sessions": [],
     "adaptationHistory": []
+  },
+  "mathematics-7f1c147e": {
+    "planId": "mathematics-7f1c147e",
+    "createdAt": "2026-10-14T06:58:20.554Z",
+    "startDate": "2026-10-14",
+    "examDate": "2026-12-15",
+    "durationDays": 62,
+    "durationSource": "exam-deadline",
+    "goalEndDate": null,
+    "dailyHoursSource": "recommended",
+    "daysRemaining": 62,
+    "dailyAvailableHours": 2,
+    "availableCapacityHours": 124,
+    "totalAvailableHours": 124,
+    "totalAllocatedHours": 124,
+    "totalCompletedHours": 0,
+    "totalMissedHours": 0,
+    "totalRemainingHours": 124,
+    "overallProgressPercentage": 0,
+    "subjects": {
+      "Mathematics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 62,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 62,
+        "progressPercentage": 0
+      },
+      "Physics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 62,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 62,
+        "progressPercentage": 0
+      }
+    },
+    "sessions": [],
+    "adaptationHistory": []
+  },
+  "mathematics-76a1d2a5": {
+    "planId": "mathematics-76a1d2a5",
+    "createdAt": "2026-10-14T07:11:45.751Z",
+    "startDate": "2026-10-14",
+    "examDate": "2026-12-15",
+    "durationDays": 62,
+    "durationSource": "exam-deadline",
+    "goalEndDate": null,
+    "dailyHoursSource": "user",
+    "daysRemaining": 62,
+    "dailyAvailableHours": 2,
+    "availableCapacityHours": 124,
+    "totalAvailableHours": 124,
+    "totalAllocatedHours": 124,
+    "totalCompletedHours": 2,
+    "totalMissedHours": 0,
+    "totalRemainingHours": 122,
+    "overallProgressPercentage": 2,
+    "subjects": {
+      "Mathematics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 62,
+        "completedHours": 2,
+        "missedHours": 0,
+        "remainingHours": 60,
+        "progressPercentage": 3
+      },
+      "Physics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 62,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 62,
+        "progressPercentage": 0
+      }
+    },
+    "sessions": [
+      {
+        "id": "sess_1791961905799_qw15",
+        "date": "2026-12-15",
+        "subject": "Mathematics",
+        "hoursSpent": 2,
+        "missedHours": 0,
+        "scheduledHours": 2,
+        "status": "completed",
+        "notes": "Initial recorded session",
+        "timestamp": "2026-10-14T07:11:45.799Z"
+      }
+    ],
+    "adaptationHistory": []
+  },
+  "mathematics-52aa113c": {
+    "planId": "mathematics-52aa113c",
+    "createdAt": "2026-10-14T07:14:11.394Z",
+    "startDate": "2026-10-14",
+    "examDate": "2026-12-15",
+    "durationDays": 62,
+    "durationSource": "exam-deadline",
+    "goalEndDate": null,
+    "dailyHoursSource": "user",
+    "daysRemaining": 62,
+    "dailyAvailableHours": 2,
+    "availableCapacityHours": 124,
+    "totalAvailableHours": 124,
+    "totalAllocatedHours": 124,
+    "totalCompletedHours": 2,
+    "totalMissedHours": 0,
+    "totalRemainingHours": 122,
+    "overallProgressPercentage": 2,
+    "subjects": {
+      "Mathematics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 62,
+        "completedHours": 2,
+        "missedHours": 0,
+        "remainingHours": 60,
+        "progressPercentage": 3
+      },
+      "Physics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 62,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 62,
+        "progressPercentage": 0
+      }
+    },
+    "sessions": [
+      {
+        "id": "sess_1791962051439_d0ho",
+        "date": "2026-12-15",
+        "subject": "Mathematics",
+        "hoursSpent": 2,
+        "missedHours": 0,
+        "scheduledHours": 2,
+        "status": "completed",
+        "notes": "Initial recorded session",
+        "timestamp": "2026-10-14T07:14:11.439Z"
+      }
+    ],
+    "adaptationHistory": []
+  },
+  "operating-systems-3f20c1e4": {
+    "planId": "operating-systems-3f20c1e4",
+    "createdAt": "2026-10-14T10:24:17.176Z",
+    "startDate": "2026-10-14",
+    "examDate": null,
+    "durationDays": 5,
+    "durationSource": "user",
+    "goalEndDate": "2026-10-18",
+    "dailyHoursSource": "user",
+    "daysRemaining": 5,
+    "dailyAvailableHours": 2,
+    "availableCapacityHours": 10,
+    "totalAvailableHours": 10,
+    "totalAllocatedHours": 10,
+    "totalCompletedHours": 0,
+    "totalMissedHours": 0,
+    "totalRemainingHours": 10,
+    "overallProgressPercentage": 0,
+    "subjects": {
+      "Operating systems": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 10,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 10,
+        "progressPercentage": 0
+      }
+    },
+    "sessions": [],
+    "adaptationHistory": []
+  },
+  "mathematics-5652f953": {
+    "planId": "mathematics-5652f953",
+    "createdAt": "2026-10-14T10:27:00.522Z",
+    "startDate": "2026-10-14",
+    "examDate": null,
+    "durationDays": 30,
+    "durationSource": "recommended",
+    "goalEndDate": "2026-11-12",
+    "dailyHoursSource": "recommended",
+    "daysRemaining": 30,
+    "dailyAvailableHours": 1.5,
+    "availableCapacityHours": 45,
+    "totalAvailableHours": 45,
+    "totalAllocatedHours": 45,
+    "totalCompletedHours": 0,
+    "totalMissedHours": 0,
+    "totalRemainingHours": 45,
+    "overallProgressPercentage": 0,
+    "subjects": {
+      "Mathematics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 22.5,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 22.5,
+        "progressPercentage": 0
+      },
+      "Physics": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 22.5,
+        "completedHours": 0,
+        "missedHours": 0,
+        "remainingHours": 22.5,
+        "progressPercentage": 0
+      }
+    },
+    "sessions": [],
+    "adaptationHistory": []
+  },
+  "dbms-d3210a93": {
+    "planId": "dbms-d3210a93",
+    "createdAt": "2026-10-14T14:12:34.950Z",
+    "startDate": "2026-10-14",
+    "examDate": null,
+    "durationDays": 7,
+    "durationSource": "user",
+    "goalEndDate": "2026-10-20",
+    "dailyHoursSource": "recommended",
+    "daysRemaining": 7,
+    "dailyAvailableHours": 3,
+    "availableCapacityHours": 21,
+    "totalAvailableHours": 21,
+    "totalAllocatedHours": 14,
+    "totalCompletedHours": 2,
+    "totalMissedHours": 0,
+    "totalRemainingHours": 12,
+    "overallProgressPercentage": 14,
+    "subjects": {
+      "Dbms": {
+        "priority": "medium",
+        "weight": 2,
+        "allocatedHours": 14,
+        "completedHours": 2,
+        "missedHours": 0,
+        "remainingHours": 12,
+        "progressPercentage": 14,
+        "unadaptedMissedHours": 0
+      }
+    },
+    "sessions": [
+      {
+        "id": "sess_1791987256940_nwhg",
+        "date": "2026-10-14",
+        "subject": "Dbms",
+        "hoursSpent": 2,
+        "missedHours": 0,
+        "scheduledHours": 2,
+        "status": "completed",
+        "notes": "Mastered SQL normalization forms 1NF to BCNF",
+        "timestamp": "2026-10-14T14:14:16.940Z"
+      }
+    ],
+    "adaptationHistory": [
+      {
+        "id": "adapt_1791987214104",
+        "timestamp": "2026-10-14T14:13:34.104Z",
+        "reason": "Accelerating preparation ahead of midterm review",
+        "daysRemaining": 7,
+        "availableCapacityHours": 21,
+        "totalNeededHours": 14,
+        "totalRemainingHours": 14,
+        "recommendedDailyHours": 2,
+        "capacityWarning": null,
+        "previousAllocations": {
+          "Dbms": {
+            "allocatedHours": 14,
+            "remainingHours": 14
+          }
+        },
+        "newAllocations": {
+          "Dbms": {
+            "allocatedHours": 14,
+            "remainingHours": 14
+          }
+        }
+      }
+    ]
   }
 }

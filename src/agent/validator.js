@@ -497,5 +497,33 @@ export function verifyToolResult(toolName, toolArgs = {}, executionResult = {}) 
         }
     }
 
+    // Verification for create_quiz
+    if (toolName === "create_quiz") {
+        if (!data || typeof data !== "object" || !Array.isArray(data.questions) || data.questions.length === 0) {
+            return { valid: false, error: "create_quiz returned an invalid or empty quiz structure." };
+        }
+    }
+
+    // Verification for save_quiz_result
+    if (toolName === "save_quiz_result") {
+        if (!data || typeof data !== "object" || data.score === undefined) {
+            return { valid: false, error: "save_quiz_result did not return a valid result summary." };
+        }
+    }
+
+    // Verification for get_weak_topics
+    if (toolName === "get_weak_topics") {
+        if (!data || typeof data !== "object" || !Array.isArray(data.weakTopics)) {
+            return { valid: false, error: "get_weak_topics did not return a valid list of weak topics." };
+        }
+    }
+
+    // Verification for get_study_progress
+    if (toolName === "get_study_progress") {
+        if (!data || typeof data !== "object") {
+            return { valid: false, error: "get_study_progress did not return a valid progress report." };
+        }
+    }
+
     return { valid: true };
 }

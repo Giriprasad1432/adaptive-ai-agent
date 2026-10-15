@@ -424,6 +424,52 @@ export function hasExplicitPlanRetrievalRequest(text) {
 }
 
 /**
+ * Detects if a text represents an educational or conceptual tutoring request
+ * (e.g. explaining CS algorithms, concepts, code snippets, math formulas, general academic questions)
+ * rather than a StudyPilot operational command (create/get/adapt/record plan).
+ */
+export function isEducationalTutoringIntent(text) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    const clean = text.trim();
+
+    // 1. Study plan operational requests must never be misclassified as passive tutoring
+    if (/\b(?:study\s+plan|prep\s+plan|exam\s+date|log\s+session|record\s+session|adapt\s+plan|rebalance\s+schedule)\b/i.test(clean)) {
+        return false;
+    }
+
+    // 2. Explicit quiz generation requests must delegate to the create_quiz MCP tool
+    if (/\b(?:quiz|quizzes)\b/i.test(clean) && /\b(?:create|generate|start|build|make|run|give\s+me\s+a)\b/i.test(clean)) {
+        return false;
+    }
+
+    const educationalPatterns = [
+        // Conceptual Q&A & explanations
+        /\b(?:explain|what\s+is|what\s+are|how\s+does|how\s+do|why\s+does|how\s+to\s+solve|teach\s+me|help\s+me\s+understand|give\s+me\s+(?:an?\s+)?overview\s+of)\b/i,
+        /\b(?:difference\s+between|compare\s+and\s+contrast|versus|\bvs\.?\b)\b/i,
+        /\b(?:in\s+simple\s+terms|for\s+beginners?|beginner-friendly|step\s*-\s*by\s*-\s*step|deep\s+dive|advanced\s+overview)\b/i,
+        // Coding, programming, debugging & exercises
+        /\b(?:example|code|sample|syntax|implementation)\s+(?:of|for|in|showing|demonstrating)\b/i,
+        /\b(?:write|debug|fix|analyze|troubleshoot|solve)\s+(?:a\s+)?(?:python|c\+\+|javascript|java|rust|go|c|sql|html|css)?\s*(?:code|program|function|script|error|bug|issue|exception)\b/i,
+        /\b(?:help\s+me\s+debug|why\s+does\s+(?:this|my)\b|error\b|exception\b|nullpointer|stack\s*overflow|syntaxerror|runtime\s*error|segmentation\s*fault)\b/i,
+        /\b(?:exercise|exercises|practice\s+problems?|practice\s+questions?|viva\s+questions?|interview\s+questions?)\b/i,
+        // Computer Science & Software Engineering
+        /\b(?:recursion|recursive|binary\s+search|bfs|dfs|dynamic\s+programming|dijkstra|deadlock|semaphore|mutex|concurrency|multithreading|time\s+complexity|big\s+o|asymptotic|sorting\s+algorithm|bubble\s+sort|merge\s+sort|quick\s+sort)\b/i,
+        /\b(?:normalization|normal\s+form|1nf|2nf|3nf|bcnf|acid\s+properties|transactions?|sql\s+query|indexing|b-tree|foreign\s+key)\b/i,
+        /\b(?:tcp|udp|osi\s+model|dns|http|ip\s+address|subnetting|packet|socket|routing)\b/i,
+        /\b(?:virtual\s+memory|paging|page\s+fault|cpu\s+scheduling|process\s+vs\s+thread|context\s+switch)\b/i,
+        /\b(?:machine\s+learning|gradient\s+descent|neural\s+network|deep\s+learning|supervised|unsupervised|classification|regression)\b/i,
+        // Mathematics & Aptitude
+        /\b(?:calculus|derivative|integral|eigenvalues?|eigenvectors?|matrix\s+multiplication|linear\s+algebra|differential\s+equations?|probability|bayes|normal\s+distribution)\b/i,
+        /\b(?:algebra|permutation|combination|discrete\s+mathematics|graph\s+theory|combinatorics|arithmetic|syllogism|logical\s+reasoning|aptitude|profit\s+and\s+loss|speed\s+and\s+distance)\b/i,
+        // Natural & Physical Sciences
+        /\b(?:photosynthesis|newton'?s\s+laws?|thermodynamics|quantum|mitochondria|dna\s+replication|periodic\s+table)\b/i
+    ];
+
+    return educationalPatterns.some(p => p.test(clean));
+}
+
+
+/**
  * Detects if a text represents a study plan retrieval or inspection intent
  * @param {string} text
  * @returns {boolean}
@@ -431,6 +477,10 @@ export function hasExplicitPlanRetrievalRequest(text) {
 export function isRetrievalIntent(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     const clean = text.trim();
+
+    if (isEducationalTutoringIntent(clean)) {
+        return false;
+    }
 
     const isPlanCreation = /\b(?:create|make|build|generate)\b.{0,60}\b(?:study\s+plan|plan)\b/i.test(clean);
     if (isPlanCreation && !hasExplicitPlanRetrievalRequest(clean)) return false;
@@ -523,7 +573,10 @@ export function isPlanCreationContinuation(text, conversation = []) {
         }
     }
     const priorCreate = conversation.slice(lastCreateCompletion + 1, lastAssistantIndex).some(item =>
-        item?.role === "user" && /\b(?:create|make|build|generate|set up)\b.{0,100}\b(?:study\s+plan|plan)\b/i.test(String(item.content || ""))
+        item?.role === "user" && (
+            /\b(?:create|make|build|generate|set up|start)\b.{0,100}\b(?:study\s+plan|plan|schedule)\b/i.test(String(item.content || "")) ||
+            /\b(?:want to study|plan to study|need to study|study for|prepare for)\b/i.test(String(item.content || ""))
+        )
     );
     const asksCreationDetails = /\b(?:study\s+plan|plan|subject|daily|hours?|duration|days?|week|identifier|plan\s+id)\b/i.test(lastAssistant);
     return priorCreate && asksCreationDetails;
