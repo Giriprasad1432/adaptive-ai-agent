@@ -78,35 +78,6 @@ export function ChatComposer({
             />
 
             <div className="composer-actions-cluster">
-              <button
-                type="button"
-                className="composer-inline-icon-btn"
-                title="Attach notes or topic context"
-                aria-label="Attach notes"
-                onClick={() => {}}
-              >
-                <span aria-hidden="true">📎</span>
-              </button>
-
-              <button
-                type="button"
-                className="composer-inline-icon-btn"
-                title="Add reference image or formula"
-                aria-label="Add image"
-                onClick={() => {}}
-              >
-                <span aria-hidden="true">🖼️</span>
-              </button>
-
-              <button
-                type="button"
-                className="composer-inline-icon-btn"
-                title="Options"
-                aria-label="Options"
-                onClick={() => {}}
-              >
-                <span aria-hidden="true">⌵</span>
-              </button>
 
               {loading ? (
                 <button
