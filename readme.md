@@ -192,4 +192,4 @@ The server will listen at `http://<host>:8000/mcp`.
   }
 }
 ```
-Any remote client can now invoke all 9 tools via standard JSON-RPC 2.0 with complete session isolation and security.
+Any remote client can now invoke all 13 tools via standard JSON-RPC 2.0 with complete session isolation and security.
