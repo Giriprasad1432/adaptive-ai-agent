@@ -480,13 +480,18 @@ function App() {
                   {/* Empty state or Onboarding Hero matching mockup */}
                   {messages.length === 0 ? (
                     <div className="chat-onboarding-hero">
-                      <div className="onboarding-bot-avatar-glow" aria-hidden="true">
-                        <span className="onboarding-bot-emoji">🤖</span>
+                      <div className="onboarding-orbit" aria-hidden="true">
+                        <span className="orbit-ring orbit-ring-one" />
+                        <span className="orbit-ring orbit-ring-two" />
+                        <span className="onboarding-bot-avatar-glow"><span className="onboarding-bot-emoji">✦</span></span>
+                        <span className="orbit-spark orbit-spark-one">✧</span>
+                        <span className="orbit-spark orbit-spark-two">·</span>
                       </div>
 
-                      <h2 className="onboarding-heading">Hi {userName}! 👋</h2>
+                      <span className="onboarding-eyebrow">YOUR PERSONAL AI STUDY COMPANION</span>
+                      <h2 className="onboarding-heading">Hi {userName}, what’s on your mind?</h2>
                       <p className="onboarding-subheading">
-                        I'm your StudyPilot AI tutor. What would you like to learn, and what is your goal?
+                        Ask anything, explore a new subject, or tell me what you’re working toward. We’ll figure out the next step together.
                       </p>
 
                       {!isMcpReady && apiStatus === 'partial' && (
@@ -496,6 +501,7 @@ function App() {
                         </div>
                       )}
 
+                      <div className="onboarding-prompt-label">A good place to start</div>
                       <div className="onboarding-chips-grid" role="region" aria-label="Suggested Learning Paths">
                         {ONBOARDING_CHIPS.map((chip) => {
                           const disabled = chip.requiresPlanTools && !isMcpReady

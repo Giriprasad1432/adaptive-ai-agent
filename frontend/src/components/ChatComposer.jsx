@@ -15,8 +15,13 @@ export function ChatComposer({
   onDraftConsumed,
 }) {
   const [text, setText] = useState('')
+  const [listening, setListening] = useState(false)
+  const [voiceError, setVoiceError] = useState('')
   const [prevDraft, setPrevDraft] = useState(draftValue)
   const textareaRef = useRef(null)
+  const recognitionRef = useRef(null)
+
+  useEffect(() => () => recognitionRef.current?.stop(), [])
 
   if (draftValue && draftValue !== prevDraft) {
     setPrevDraft(draftValue)
@@ -57,6 +62,37 @@ export function ChatComposer({
     }
   }
 
+  const handleVoiceInput = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      setVoiceError('Voice input is not supported in this browser. Try Chrome or Edge.')
+      return
+    }
+    if (listening) {
+      recognitionRef.current?.stop()
+      setListening(false)
+      return
+    }
+    setVoiceError('')
+    const recognition = new SpeechRecognition()
+    recognition.lang = navigator.language || 'en-US'
+    recognition.interimResults = true
+    recognition.continuous = false
+    recognitionRef.current = recognition
+    recognition.onstart = () => setListening(true)
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results).map((result) => result[0].transcript).join('')
+      setText(transcript)
+      if (textareaRef.current) adjustHeight(textareaRef.current)
+    }
+    recognition.onerror = (event) => {
+      setListening(false)
+      setVoiceError(event.error === 'not-allowed' ? 'Allow microphone access to use voice input.' : 'Voice input stopped. Please try again.')
+    }
+    recognition.onend = () => setListening(false)
+    recognition.start()
+  }
+
   return (
     <footer className="composer-region">
       <div className="composer-inner">
@@ -78,6 +114,22 @@ export function ChatComposer({
             />
 
             <div className="composer-actions-cluster">
+
+              {!loading && (
+                <button
+                  type="button"
+                  className={`btn-voice-input ${listening ? 'is-listening' : ''}`}
+                  onClick={handleVoiceInput}
+                  title={listening ? 'Stop voice input' : 'Speak your question'}
+                  aria-label={listening ? 'Stop voice input' : 'Start voice input'}
+                  aria-pressed={listening}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="9" y="2" width="6" height="12" rx="3" />
+                    <path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8" />
+                  </svg>
+                </button>
+              )}
 
               {loading ? (
                 <button
@@ -118,8 +170,9 @@ export function ChatComposer({
           </div>
         </form>
 
-        <div className="composer-hint-caption">
-          <span>✓ Press Enter to send • Shift + Enter for new line</span>
+        {voiceError && <div className="voice-input-error" role="status">{voiceError}</div>}
+        <div className={`composer-hint-caption ${listening ? 'voice-listening-caption' : ''}`}>
+          <span>{listening ? 'Listening… speak naturally, then send your question' : 'Press Enter to send · Shift + Enter for a new line · Tap the mic to speak'}</span>
         </div>
       </div>
     </footer>
