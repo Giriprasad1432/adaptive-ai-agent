@@ -53,7 +53,7 @@ export function RightLearningPanel({
         activePlanId && cleanPlans.some((p) => p.planId === activePlanId)
           ? activePlanId
           : cleanPlans.length > 0
-          ? cleanPlans[0].planId
+          ? cleanPlans[cleanPlans.length - 1].planId
           : null
 
       if (selectedId) {
