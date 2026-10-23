@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getPlan, loadAllPlans, saveNewPlan, updatePlan, deletePlan, getUserPreferences, saveUserPreferences, resetAllLearningData } from "./storage.js";
-import { createPlan, recordSession, adaptPlan, getActiveSessionCount, resolvePlanDayDate } from "./planner.js";
+import { createPlan, recordSession, adaptPlan, getActiveSessionCount, resolvePlanDayDate, resolvePlanSubject } from "./planner.js";
 import { createQuiz, saveQuizResult, getWeakTopics, getStudyProgress, resetQuizData } from "./quizManager.js";
 
 function createMcpServer() {
@@ -237,14 +237,15 @@ function createMcpServer() {
             try {
                 if (!planId) return { isError: true, content: [{ type: "text", text: "No study plan was selected. List saved plans and choose by subject or plan description." }] };
                 const updated = updatePlan(planId, (plan) => {
-                    if (!Object.hasOwn(plan.subjects || {}, subject)) {
+                    const targetSubject = resolvePlanSubject(plan, subject);
+                    if (!targetSubject) {
                         throw new Error(`Subject "${subject}" is not part of study plan "${planId}".`);
                     }
                     const sessionDate = date || (dayNumber !== undefined
                         ? resolvePlanDayDate(plan, dayNumber)
                         : undefined);
                     return recordSession(plan, {
-                        subject,
+                        subject: targetSubject,
                         hoursSpent,
                         missedHours,
                         scheduledHours,
@@ -267,13 +268,14 @@ function createMcpServer() {
                 }
 
                 const { plan, result } = updated;
+                const recordedSubject = result.session.subject || subject;
 
                 const outcome = {
-                    message: `Study session for "${subject}" recorded successfully (${status}).`,
+                    message: `Study session for "${recordedSubject}" recorded successfully (${status}).`,
                     planId: plan.planId,
                     session: result.session,
                     subjectProgress: {
-                        subject,
+                        subject: recordedSubject,
                         completedHours: result.updatedSubject.completedHours,
                         missedHours: result.updatedSubject.missedHours,
                         remainingHours: result.updatedSubject.remainingHours,

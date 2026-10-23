@@ -66,6 +66,83 @@ export function cleanSubjectName(item) {
 }
 
 /**
+ * Resolves a requested subject against a plan's defined subjects, handling:
+ * 1. Exact match (e.g. "DBMS" === "DBMS")
+ * 2. Case-insensitive match (e.g. "dbms" === "DBMS")
+ * 3. Standard computer science / STEM acronym & alias mapping (e.g. "DBMS" <-> "Database Management Systems")
+ * 4. Distinct substring match (e.g. "Database" -> "Database Management Systems")
+ */
+export function resolvePlanSubject(plan, requestedSubject) {
+    if (!plan || !plan.subjects || !requestedSubject) return null;
+    const subjects = Object.keys(plan.subjects);
+    if (subjects.length === 0) return null;
+
+    // 1. Exact match
+    if (Object.hasOwn(plan.subjects, requestedSubject)) {
+        return requestedSubject;
+    }
+
+    const cleanReq = String(requestedSubject).trim();
+    const cleanReqLower = cleanReq.toLowerCase();
+
+    // 2. Case-insensitive match
+    const caseMatch = subjects.find(s => s.toLowerCase() === cleanReqLower);
+    if (caseMatch) return caseMatch;
+
+    // 3. Known acronym / alias mappings
+    const ACRONYMS = {
+        "dbms": ["database management systems", "database management system", "database", "databases"],
+        "dms": ["database management systems", "database management system"],
+        "os": ["operating systems", "operating system"],
+        "cn": ["computer networks", "computer networking", "computer network"],
+        "ai": ["artificial intelligence"],
+        "ml": ["machine learning"],
+        "dl": ["deep learning"],
+        "dsa": ["data structures and algorithms", "data structures & algorithms", "data structures"],
+        "ds": ["data structures", "data science"],
+        "oop": ["object oriented programming", "object-oriented programming"],
+        "oops": ["object oriented programming", "object-oriented programming"],
+        "se": ["software engineering"],
+        "toc": ["theory of computation"],
+        "cd": ["compiler design"],
+        "coa": ["computer organization and architecture", "computer organization & architecture"],
+        "ca": ["computer architecture"],
+        "js": ["javascript"],
+        "ts": ["typescript"],
+        "py": ["python"],
+        "cpp": ["c++"]
+    };
+
+    for (const s of subjects) {
+        const sLower = s.toLowerCase();
+        const expansions = ACRONYMS[cleanReqLower];
+        if (expansions && expansions.some(exp => sLower.includes(exp) || exp.includes(sLower))) {
+            return s;
+        }
+        const sExpansions = ACRONYMS[sLower];
+        if (sExpansions && sExpansions.some(exp => exp === cleanReqLower)) {
+            return s;
+        }
+        // Direct initials check: e.g. "Database Management Systems" -> "DMS" or "DBMS"
+        const words = sLower.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+        const initials = words.map(w => w[0]).join("");
+        if (initials === cleanReqLower || (words[0] === "database" && initials.replace(/^d/, "db") === cleanReqLower)) {
+            return s;
+        }
+    }
+
+    // 4. Substring inclusion if unambiguous
+    const substringMatches = subjects.filter(s =>
+        s.toLowerCase().includes(cleanReqLower) || cleanReqLower.includes(s.toLowerCase())
+    );
+    if (substringMatches.length === 1) {
+        return substringMatches[0];
+    }
+
+    return null;
+}
+
+/**
  * Normalizes subjects list into array of clean subject names
  */
 export function normalizeSubjects(subjects) {
@@ -391,7 +468,7 @@ export function recordSession(plan, {
 
     normalizePlan(plan);
 
-    const cleanSubject = String(subject).trim();
+    const cleanSubject = resolvePlanSubject(plan, subject) || String(subject).trim();
     let targetSubject = plan.subjects[cleanSubject];
 
     // If subject was not originally defined, dynamically initialize it
