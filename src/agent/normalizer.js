@@ -579,7 +579,7 @@ export function isPlanCreationContinuation(text, conversation = []) {
     const lastAssistantIndex = conversation.map(item => item?.role).lastIndexOf("assistant");
     if (lastAssistantIndex < 0) return false;
     const lastAssistant = String(conversation[lastAssistantIndex]?.content || "");
-    if (!/[?？]/.test(lastAssistant) && !/\b(?:could you|please (?:provide|tell|let me know)|let me know|which subject|what subject)\b/i.test(lastAssistant)) return false;
+    if (!/[?？]/.test(lastAssistant) && !/\b(?:could you|please (?:provide|tell|let me know)|let me know|which subject|what subject|before I save|proposed|ready to save|save it|shall I|confirm)\b/i.test(lastAssistant)) return false;
 
     let lastCreateCompletion = -1;
     for (let i = 0; i < lastAssistantIndex; i++) {
@@ -1054,20 +1054,28 @@ export function normalizeToolArguments(toolOrSchema, rawArgs = {}, options = {})
         const lastCreateCompletion = Array.isArray(contextMessages)
             ? contextMessages.reduce((last, item, index) => item?.role === "assistant" && /\bcreated successfully\b/i.test(String(item.content || "")) ? index : last, -1)
             : -1;
-        const creationText = continuation && Array.isArray(contextMessages)
+        const uncompletedUserText = Array.isArray(contextMessages)
             ? contextMessages.slice(lastCreateCompletion + 1).filter(item => item?.role === "user" && typeof item.content === "string").map(item => item.content).join(" ")
-            : currentUserText;
-        const explicitHours = [...creationText.matchAll(/(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi)].at(-1);
-        const dailyHoursSpecified = /\b(?:per|a|each)\s*day\b|\bdaily\b|\b(?:hours?|hrs?)\s*\/\s*day\b/i.test(creationText);
-        const explicitDuration = creationText.match(/\b(\d{1,4})\s*[- ]?days?\b|\b(\d{1,3})\s*weeks?\b|\b(\d{1,3})\s*week\b|\b(?:a|one)\s+week\b/i);
+            : "";
+        const creationText = [uncompletedUserText, currentUserText].filter(Boolean).join(" ");
+        const explicitHours = [...creationText.matchAll(/(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/gi)].at(-1);
+        const dailyHoursSpecified = /\b(?:per|a|each)\s*day\b|\bdaily\b|(?:hours?|hrs?|h)\s*\/\s*day\b/i.test(creationText);
+        const explicitDuration = creationText.match(/\b(\d{1,4})\s*[- ]?(?:days?|d)\b|\b(\d{1,3})\s*weeks?\b|\b(\d{1,3})\s*week\b|\b(?:a|one)\s+week\b/i);
         const hourValue = explicitHours && dailyHoursSpecified && Number(explicitHours[1]);
         const durationValue = explicitDuration && (explicitDuration[1]
             ? Number(explicitDuration[1])
             : /\b(?:a|one)\s+week\b/i.test(explicitDuration[0]) ? 7 : Number(explicitDuration[2] || explicitDuration[3]) * 7);
-        if (Number.isFinite(hourValue) && properties.dailyAvailableHours) normalized.dailyAvailableHours = hourValue;
-        else if (currentUserText.trim() && properties.dailyAvailableHours) delete normalized.dailyAvailableHours;
-        if (durationValue && properties.durationDays) normalized.durationDays = durationValue;
-        else if (currentUserText.trim() && properties.durationDays) delete normalized.durationDays;
+        if (Number.isFinite(hourValue) && properties.dailyAvailableHours) {
+            normalized.dailyAvailableHours = hourValue;
+        } else if (currentUserText.trim() && properties.dailyAvailableHours) {
+            delete normalized.dailyAvailableHours;
+        }
+
+        if (durationValue && properties.durationDays) {
+            normalized.durationDays = durationValue;
+        } else if (currentUserText.trim() && properties.durationDays) {
+            delete normalized.durationDays;
+        }
         const explicitDate = extractExplicitDate(creationText);
         if (explicitDate && properties.examDate) normalized.examDate = explicitDate;
         else if (currentUserText.trim() && properties.examDate &&
